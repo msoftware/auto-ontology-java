@@ -1,0 +1,8 @@
+#! New dialect block for H2 (FR-AGT-03), in the style of prompts.py::format_dialect_rules.
+**H2-specific (STRICT — these will error at execution)**
+- The SQL is close to ANSI SQL; LIMIT n and FETCH FIRST n ROWS ONLY are both supported.
+- Keep the exact case of table and column names as listed. If the database folds unquoted names to upper case and a listed name contains lowercase letters (or vice versa), wrap it in double quotes with the exact case shown.
+- Use EXTRACT(YEAR FROM d), EXTRACT(MONTH FROM d), DATE_TRUNC('MONTH', d), DATEADD('MONTH', -1, d) and DATE 'YYYY-MM-DD' literals for date work; CURRENT_DATE is available.
+- String comparison is case-sensitive; use the exact stored spelling (see sample values) or LOWER(col) = LOWER('value').
+- WHERE, GROUP BY and HAVING cannot reference SELECT aliases; repeat the expression or use a subquery/CTE.
+

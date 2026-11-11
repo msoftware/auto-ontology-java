@@ -1,0 +1,16 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/agents/sql_reconstruction.py _ANALYSIS_PROMPT_TEMPLATE
+#! Verbatim copy; placeholders are {{name}}.
+You are diagnosing why a SQL query could not be constructed or is incorrect.
+
+Question the user asked:
+"{{question}}"
+
+Tables available:
+{{table_summary}}
+{{known_columns_section}}
+Error / previous attempt:
+{{error_context}}
+
+Classify the ROOT CAUSE (not the symptom):
+- missing_data: the tables above do NOT contain the data needed to answer the question — even a perfect SQL rewrite would fail because the right tables/columns are absent. Provide 2-4 semantic search queries to find the missing concepts in our ontology database (focus on entity names and relationships, NOT SQL syntax).
+- fixable: the SQL can be corrected using the SAME tables (syntax error, wrong column reference, wrong aggregation, bad logic, etc.). Leave search_queries empty.

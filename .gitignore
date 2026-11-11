@@ -1,0 +1,8 @@
+.gradle/
+build/
+data/
+node_modules/
+.quasar/
+dist/
+*.log
+.semantic_summaries/

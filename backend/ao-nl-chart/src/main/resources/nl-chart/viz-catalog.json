@@ -1,0 +1,106 @@
+{
+  "_comment": "Viz catalog of the built-in quasar-dashboard types (FR-NLC-06): data controls, defaults and when to use them. Kept in sync with packages/dashboard/src/viz/*/controlPanel.ts; a generated export from listVizPlugins() can replace this file.",
+  "common": {
+    "controls": {
+      "adhoc_filters": {"kind": "filters", "default": []},
+      "granularity_sqla": {"kind": "column", "columnKind": "temporal", "default": "main_dttm_col of the dataset"},
+      "time_range": {"kind": "time_range", "default": "No filter"},
+      "time_grain_sqla": {"kind": "enum", "values": ["PT1S", "PT1M", "PT5M", "PT15M", "PT30M", "PT1H", "P1D", "P1W", "P1M", "P3M", "P1Y"], "default": null},
+      "row_limit": {"kind": "number", "default": 10000}
+    },
+    "operators": ["==", "!=", ">", "<", ">=", "<=", "LIKE", "NOT LIKE", "ILIKE", "NOT ILIKE", "IS NULL", "IS NOT NULL", "IN", "NOT IN", "IS TRUE", "IS FALSE", "TEMPORAL_RANGE"]
+  },
+  "types": {
+    "line": {
+      "when": "Development over time: x_axis is the temporal column, time_grain_sqla from daily/weekly/monthly.",
+      "controls": {
+        "x_axis": {"kind": "column", "columnKind": "groupby", "required": true},
+        "metrics": {"kind": "metrics", "required": true, "multiple": true},
+        "series": {"kind": "column", "columnKind": "groupby"},
+        "orderby": {"kind": "orderby"},
+        "series_limit": {"kind": "number", "default": 0},
+        "series_type": {"kind": "enum", "values": ["line", "smooth", "step"], "customize": true},
+        "area": {"kind": "boolean", "customize": true},
+        "stack": {"kind": "enum", "values": ["none", "stack", "expand"], "customize": true}
+      },
+      "defaults": {"metrics": [], "series": null, "orderby": [], "series_limit": 0, "series_type": "line", "area": false, "stack": "none"}
+    },
+    "bar": {
+      "when": "Comparison of categories; orientation horizontal for many or long categories.",
+      "controls": {
+        "x_axis": {"kind": "column", "columnKind": "groupby", "required": true},
+        "metrics": {"kind": "metrics", "required": true, "multiple": true},
+        "series": {"kind": "column", "columnKind": "groupby"},
+        "orderby": {"kind": "orderby"},
+        "series_limit": {"kind": "number", "default": 0},
+        "orientation": {"kind": "enum", "values": ["vertical", "horizontal"], "customize": true},
+        "stack": {"kind": "enum", "values": ["none", "stack", "expand"], "customize": true},
+        "show_value": {"kind": "boolean", "customize": true}
+      },
+      "defaults": {"metrics": [], "series": null, "orderby": [], "series_limit": 0, "orientation": "vertical", "stack": "none", "show_value": false}
+    },
+    "pie": {
+      "when": "Share of a whole with an additive metric and at most about 8 categories. Uses two queries (not allowed in SQL mode).",
+      "controls": {
+        "groupby": {"kind": "column", "columnKind": "groupby", "required": true},
+        "metric": {"kind": "metric", "required": true},
+        "sort_desc": {"kind": "boolean"},
+        "donut": {"kind": "boolean", "customize": true}
+      },
+      "defaults": {"sort_desc": true, "row_limit": 25, "donut": false}
+    },
+    "big_number": {
+      "when": "A single key figure; show_trend for development/trend/compared to previous period (needs time_grain_sqla).",
+      "controls": {
+        "metric": {"kind": "metric", "required": true},
+        "show_trend": {"kind": "boolean"},
+        "compare_lag": {"kind": "number", "default": 1}
+      },
+      "defaults": {"show_trend": false, "compare_lag": 1, "row_limit": 100}
+    },
+    "scatter": {
+      "when": "Two measures per entity.",
+      "controls": {
+        "entity": {"kind": "column", "columnKind": "groupby", "required": true},
+        "x_metric": {"kind": "metric", "required": true},
+        "y_metric": {"kind": "metric", "required": true},
+        "size_metric": {"kind": "metric"},
+        "series": {"kind": "column", "columnKind": "groupby"}
+      },
+      "defaults": {"size_metric": null, "series": null}
+    },
+    "heatmap": {
+      "when": "Two dimensions and one measure.",
+      "controls": {
+        "x_axis": {"kind": "column", "columnKind": "groupby", "required": true},
+        "y_axis": {"kind": "column", "columnKind": "groupby", "required": true},
+        "metric": {"kind": "metric", "required": true}
+      },
+      "defaults": {}
+    },
+    "pivot_table": {
+      "when": "Cross table of two dimension groups when the question says table/cross table. Uses several queries (not allowed in SQL mode).",
+      "controls": {
+        "groupbyRows": {"kind": "columns", "columnKind": "groupby", "required": true, "multiple": true},
+        "groupbyColumns": {"kind": "columns", "columnKind": "groupby", "multiple": true},
+        "metrics": {"kind": "metrics", "required": true, "multiple": true},
+        "metrics_layout": {"kind": "enum", "values": ["COLUMNS", "ROWS"]},
+        "row_subtotals": {"kind": "boolean"},
+        "col_subtotals": {"kind": "boolean"}
+      },
+      "defaults": {"groupbyColumns": [], "metrics_layout": "COLUMNS", "row_subtotals": false, "col_subtotals": false}
+    },
+    "table": {
+      "when": "Detail list / raw data (query_mode raw with all_columns) or an aggregated table (query_mode aggregate with groupby, metrics, orderby, row_limit).",
+      "controls": {
+        "query_mode": {"kind": "enum", "values": ["aggregate", "raw"], "required": true},
+        "groupby": {"kind": "columns", "columnKind": "groupby", "multiple": true},
+        "metrics": {"kind": "metrics", "multiple": true},
+        "all_columns": {"kind": "columns", "multiple": true},
+        "orderby": {"kind": "orderby"},
+        "show_totals": {"kind": "boolean"}
+      },
+      "defaults": {"query_mode": "aggregate", "groupby": [], "metrics": [], "all_columns": [], "orderby": [], "show_totals": false, "server_pagination": false, "page_length": 0}
+    }
+  }
+}

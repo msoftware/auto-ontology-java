@@ -1,0 +1,10 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/prompts.py _POSTGRES_DIALECT_RULES
+#! Verbatim copy; placeholders are {{name}}.
+**PostgreSQL-specific (STRICT — these will error at execution)**
+- WHERE and HAVING cannot reference SELECT aliases. Repeat the full expression or wrap in a subquery/CTE.
+- GROUP BY cannot reference SELECT aliases. Repeat the full expression (including CASE WHEN blocks) in GROUP BY, or wrap the query in a subquery/CTE.
+- The JSONB ->> operator always returns TEXT, even for JSON numbers. Whenever a JSONB field holds a numeric metric, score, count, percentage, or measurement, you MUST cast the ->> expression to NUMERIC (e.g. CAST(col->'a'->>'b' AS NUMERIC)) in SELECT as well as in WHERE/ORDER BY — never project a numeric JSONB field as raw text.
+- In PostgreSQL, AVG() and arithmetic (+, -, *, /) on REAL/DOUBLE PRECISION columns return floating-point (double precision); wrap computed AVG() and arithmetic metric projections in CAST(... AS NUMERIC) so fractional metrics are returned as NUMERIC.
+- Postgres folds unquoted identifiers to lowercase. If a table or column name shown in AVAILABLE TABLES / KNOWN COLUMN MAPPINGS contains any uppercase letter, wrap it in double quotes using the EXACT case shown — leaving it unquoted silently resolves to the wrong (lowercase) relation and errors as 'does not exist'. All-lowercase names need no quoting.
+
+

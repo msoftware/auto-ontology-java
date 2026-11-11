@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# The quasar-dashboard library is consumed from its sources (QdChartRenderer, NFR-QD-08).
+packages:
+  - 'packages/*'
+  - 'apps/*'
+  - '../../quasar-dashboard/packages/dashboard'
+  - '../../quasar-dashboard/packages/mock-backend'
+
+allowBuilds:
+  '@parcel/watcher': true
+  esbuild: true
+  msw: true
+  rolldown: true
+  lightningcss: true
+
+minimumReleaseAgeExclude:
+  - '@intlify/core-base@11.4.16'
+  - '@intlify/devtools-types@11.4.16'
+  - '@intlify/message-compiler@11.4.16'
+  - '@intlify/shared@11.4.16'
+  - vue-i18n@11.4.16

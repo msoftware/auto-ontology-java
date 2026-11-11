@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: Apache-2.0
+# Combined demo host (FR-NLC-23): ./gradlew :ao-dashboard-demo:bootRun
+# Needs one OpenAI-compatible LLM endpoint for suggestions (DEFAULT_MODELS_*); everything else is local.
+server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: ao-dashboard-demo
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:h2:mem:quasar-dashboard-demo;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1
+    username: sa
+    password: ''
+
+quasar-dashboard:
+  api-prefix: /api/v1
+  fixed-now: 2026-06-30T00:00:00Z
+
+ao:
+  api-prefix: /api
+  user:
+    id: demo
+    display-name: Demo user
+  vector:
+    # no Docker needed; profile "qdrant" switches to a Qdrant service
+    store: memory
+    dimensions: ${AO_VECTOR_DIMENSIONS:768}
+  embedding:
+    provider: ${AO_EMBEDDING_PROVIDER:hash}
+  ingest:
+    connections:
+      # the analytics database of the dashboard, via the existing DataSource bean (FR-NLC-01)
+      - name: analytics
+        datasource-bean: dataSource
+        schemas: [public, hr, main]
+        # only the fact tables: excludes qd_* and the Auto-Ontology store tables in the same H2
+        table-allow-regex: ^(sales|web_traffic|employees|inventory)$
+  dashboard:
+    database-mapping:
+      analytics: analytics
+      warehouse: analytics
+
+---
+spring:
+  config:
+    activate:
+      on-profile: qdrant
+ao:
+  vector:
+    store: qdrant

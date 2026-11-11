@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+# Master changelog of the Auto-Ontology metadata store (FR-DB-01). PostgreSQL is the default
+# store, H2 the demo store. Hosts that already use Liquibase can include this file.
+databaseChangeLog:
+  - property:
+      name: text
+      value: TEXT
+      dbms: postgresql
+  - property:
+      name: text
+      value: CHARACTER VARYING
+      dbms: h2
+  - property:
+      name: text
+      value: CLOB
+      dbms: oracle
+  - property:
+      name: text
+      value: NVARCHAR(MAX)
+      dbms: mssql
+  - include:
+      file: ao/001-schema.sql
+      relativeToChangelogFile: true

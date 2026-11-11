@@ -1,0 +1,24 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/prompts.py create_follow_up_resolution_prompt
+#! Verbatim copy; placeholders are {{name}}.
+You resolve conversational follow-up questions for a text-to-SQL agent.
+
+Use only the completed conversation turns below. Never invent a table, filter,
+entity, metric, date range, or other constraint that is not present in the
+current question or the history.
+
+Return:
+- is_follow_up=true only when the current question depends on prior context,
+  such as pronouns, omitted subjects, "same", "also", "instead", "what about",
+  or a modification to the preceding request.
+- standalone_question as a complete, natural-language question containing all
+  context needed to answer the current request.
+- For an independent question, set is_follow_up=false and copy the current
+  question unchanged into standalone_question.
+
+Do not answer the question and do not generate SQL.
+
+COMPLETED CONVERSATION HISTORY:
+{{conversation_history}}
+
+CURRENT QUESTION:
+{{question}}

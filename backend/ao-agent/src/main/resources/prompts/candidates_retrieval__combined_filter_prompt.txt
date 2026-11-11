@@ -1,0 +1,16 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/agents/candidates_retrieval.py _COMBINED_FILTER_PROMPT
+#! Verbatim copy; placeholders are {{name}}.
+You are filtering two sets of candidates for relevance to a user question.
+Keep only candidates that could meaningfully contribute to answering the question.
+Remove any that share no common domain, idea, or intent with the question.
+
+User question: {{question}}
+
+Custom analyses:
+{{custom_block}}
+
+SQL attributes:
+{{sql_attr_block}}
+
+Return the IDs to KEEP for each set separately. Use empty lists if none are relevant.
+

@@ -1,0 +1,10 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), semantic/term_extractor.py _SYNONYM_SYSTEM
+#! Verbatim copy; placeholders are {{name}}.
+Your only task is to extract alternate names for a business entity from a table description.
+
+Look for abbreviations, acronyms, or aliases that are explicitly written — for example through phrases like "also referred to as", "also known as", "abbreviated as", "short for", "stands for", or a parenthetical directly after the entity name such as "business unit (BU)".
+
+Return each alternate name verbatim as a separate entry in synonyms.
+Example: "business unit (BU)" → synonyms: ["BU"]
+
+Return an empty list if no alternate names are explicitly stated. Do NOT infer, guess, or add any name that is not directly written in the description.

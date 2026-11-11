@@ -1,0 +1,19 @@
+Auto-Ontology (Java/Quasar rebuild)
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product contains material derived from NVIDIA Auto-Ontology
+(Copyright (c) 2024-2026, NVIDIA CORPORATION & AFFILIATES, Apache License 2.0;
+see OPEN_SOURCE_NOTICE). Derived parts, all marked "Derived from NVIDIA Auto-Ontology":
+
+- LLM prompts, copied verbatim (backend/ao-agent/src/main/resources/prompts,
+  backend/ao-semantic/src/main/resources/prompts; exported with docs/tools/export_prompts.py)
+- calculation subtype taxonomy (prompts/calculation_subtypes.json)
+- LLM output schemas (field names and descriptions of the Pydantic models)
+- node labels, graph topology and routing of the text-to-SQL agent
+- embedding text templates (utils/embedding_rows.py, semantic/embed.py)
+- PII detection rules (pii_detection/rules.py)
+- date format inference (semantic/date_format.py)
+- MCP tool descriptions and server instructions (mcp/auto_ontology_mcp)
+- metadata schema (dal/schema.py, frontend/prisma/schema.prisma)
+
+The frontend embeds @jentsch/quasar-dashboard (sibling repository quasar-dashboard).

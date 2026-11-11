@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# Demo profile (section 19): no external services except one LLM endpoint.
+# Start: ./gradlew :ao-app:bootRun --args='--spring.profiles.active=demo'
+spring:
+  datasource:
+    # file mode so restarts keep the state (FR-DEMO-01)
+    url: jdbc:h2:file:./data/ao-store;MODE=PostgreSQL;AUTO_SERVER=FALSE
+    username: sa
+    password: ""
+  h2:
+    console:
+      # only in the demo profile and only on localhost
+      enabled: true
+      path: /h2-console
+      settings:
+        web-allow-others: false
+
+ao:
+  demo: true
+  user:
+    id: demo
+    display-name: Demo user
+  clock:
+    fixed-now: ${AO_FIXED_NOW:2026-06-30}
+  vector:
+    store: ${AO_VECTOR_STORE:memory}
+    persist: true
+    dimensions: ${AO_VECTOR_DIMENSIONS:768}
+  embedding:
+    # "hash" runs fully offline (FR-DEMO-06); set EMBED_* and AO_EMBEDDING_PROVIDER=openai for a real model
+    provider: ${AO_EMBEDDING_PROVIDER:hash}
+  ingest:
+    connections:
+      - name: demo_sales
+        url: jdbc:h2:mem:demo_sales;DB_CLOSE_DELAY=-1
+        # the query history table is excluded from the catalog (FR-DEMO-02)
+        table-deny-regex: ^QUERY_HISTORY$

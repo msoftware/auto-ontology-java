@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# Demo (section 19) against a Qdrant container: docker compose -f demo/docker-compose.demo.yml up
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    ports: ["127.0.0.1:6334:6334"]
+  backend:
+    build: { context: .., dockerfile: docker/backend.Dockerfile }
+    depends_on: [qdrant]
+    command: ["--spring.profiles.active=demo,qdrant"]
+    environment:
+      QDRANT_HOST: qdrant
+      DEFAULT_MODELS_ENDPOINT: ${DEFAULT_MODELS_ENDPOINT:-}
+      DEFAULT_MODELS_API_KEY: ${DEFAULT_MODELS_API_KEY:-}
+      DEFAULT_MODELS_MODEL: ${DEFAULT_MODELS_MODEL:-}
+    ports: ["127.0.0.1:8080:8080"]

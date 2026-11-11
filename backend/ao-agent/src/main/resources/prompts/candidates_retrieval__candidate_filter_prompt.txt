@@ -1,0 +1,13 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/agents/candidates_retrieval.py _CANDIDATE_FILTER_PROMPT
+#! Verbatim copy; placeholders are {{name}}.
+You are filtering candidate {{candidate_type}} for relevance to a user question.
+Keep only candidates that could meaningfully contribute to answering the question.
+Remove any that share no common domain, idea, or intent with the question.
+
+User question: {{question}}
+
+Candidates:
+{{candidates_block}}
+
+Return the list of IDs to KEEP. If none are relevant, return an empty list.
+

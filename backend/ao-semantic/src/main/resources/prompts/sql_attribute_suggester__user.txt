@@ -1,0 +1,27 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), semantic/sql_attribute_suggester.py (message content)
+#! Verbatim copy; placeholders are {{name}}.
+Business term: {{term_name}}
+Description: {{term_description_or_none}}
+
+Top SQL expressions extracted from queries on tables for this term (ranked by 3-month execution count):
+
+{{expr_block}}
+
+Which expressions should become a named SqlAttribute for the term '{{term_name}}'?
+
+Rules you MUST follow:
+  1. ALWAYS mark an expression as a SqlAttribute if it compares a column against a literal value (e.g. status = 'active', amount > 1000, type IN ('A','B')). Literal values encode business thresholds and categories that are exactly what SqlAttributes are designed to capture. Exception: do NOT promote an expression whose only literal is an integer that looks like a surrogate or primary-key identifier (e.g. request_id = 50000, id = 12). Such values are instance-specific record lookups, not reusable business logic. Only promote an expression containing such an integer if the surrounding context also encodes a reusable business rule (e.g. the same WHERE clause additionally filters on a status, category, or date range).
+  2. NEVER mark an expression as a SqlAttribute if it only references columns from the same table with no literal value, constant, or cross-table condition (e.g. start_date < end_date). Such expressions describe structural integrity, not reusable business logic.
+  4. NEVER mark an IS NULL / IS NOT NULL check on a surrogate or primary-key column (any column named 'id' or ending in '_id') as a SqlAttribute. These are LEFT JOIN absence checks — structural plumbing that detects whether a join matched, not a business concept (e.g. request_task_collaborators.id IS NULL). Exception: IS NULL on non-key columns that carry business meaning IS valid (e.g. deleted_at IS NULL, approved_by IS NULL).
+  3. ALWAYS mark a JOIN ON condition or a UNION/INTERSECT/EXCEPT branch as a SqlAttribute when it appears frequently AND any of the following is true:
+     a. It encodes obvious business logic — e.g. a join that filters to active records, a union arm that defines a named sub-population, or a cross-table condition capturing a business relationship.
+     b. It is used to define a meaningful business alias — e.g. a SELECT branch or subquery whose result column is aliased with a descriptive business name (e.g. 'AS active_assignees', 'AS overdue_tasks'). The alias itself signals that the expression represents a named concept worth capturing.
+     c. A UNION combines two or more SELECT branches that each use a different join path to reach the same entity type (e.g. one branch joins via a direct ownership FK, another via a membership/collaborator table). This pattern structurally defines a named aggregate concept — all members of a group regardless of their role. Promote the whole UNION as a SqlAttribute representing that concept (e.g. 'Task Participants', 'Order Stakeholders'). When naming and describing it, ignore any instance-specific WHERE predicates (like record-ID literals) and focus on the reusable structural pattern.
+     Ignore pure FK-only joins and UNION branches that select from a single table with no join or filter.
+
+For each chosen expression provide:
+  • name — user-friendly Title Case label with spaces between words, matching the ColumnAttribute naming style (e.g. 'Active Customer Filter', 'Revenue Above Threshold', 'Last 90 Days Activity')
+  • description — what business logic it captures, why it matters for this term, and when a data consumer would apply it
+  • expression — the exact SQL expression copied verbatim
+
+Return an empty list if none qualify.

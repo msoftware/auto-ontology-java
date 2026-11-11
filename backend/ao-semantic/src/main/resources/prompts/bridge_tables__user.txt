@@ -1,0 +1,19 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), semantic/bridge_tables.py (message content)
+#! Verbatim copy; placeholders are {{name}}.
+Bridge table: {{qualified_bridge}}
+Related tables: {{join_related_tables_or_unknown}}
+Foreign key columns (use these exact join keys):
+{{format_fk_block_fk_pairs}}
+
+{{join_hint}}
+
+Produce one SqlAttribute that captures how to join through this bridge table to reach all related entities.
+
+Rules:
+  • expression must be a valid SELECT … FROM … JOIN … statement
+  • schema-qualify every table name
+  • use ONLY the FK pairs listed above — do not invent columns or filters
+  • no WHERE clause with literal business filters; structural joins only
+  • name — user-friendly Title Case label (e.g. 'Order Products', 'Also Buy')
+  • description — what relationship the junction represents
+

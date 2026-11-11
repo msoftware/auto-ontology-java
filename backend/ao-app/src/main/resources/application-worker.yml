@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# Profile "worker" (NFR-ARC-03): an instance that only runs ingestion and compilation and offers /internal/**.
+# The API instance then sets ao.ingest.scheduler-enabled=false and ao.semantic.scheduler-enabled=false.
+ao:
+  ingest:
+    scheduler-enabled: true
+  semantic:
+    scheduler-enabled: true
+  internal:
+    secret: ${AO_INTERNAL_SECRET:}

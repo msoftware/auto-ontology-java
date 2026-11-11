@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: Apache-2.0
+# Demo questions with expected results (FR-DEMO-04) for the "Sales" demo database (seed 42,
+# 2024-07-01 .. 2026-06-30, ao.clock.fixed-now = 2026-06-30). Values were computed directly on the
+# demo database; revenue = SUM(SALES.INVOICE_LINES.EXTENDED_PRICE) by INVOICE_DATE.
+questions:
+  - id: counting
+    subtype: counting
+    question: How many orders were placed in June 2025?
+    expected: { value: 117 }
+  - id: follow-up
+    subtype: counting
+    follow_up_of: counting
+    question: And in July?
+    expected: { value: 137 }
+  - id: multi-join-aggregation
+    subtype: aggregation
+    question: What was revenue for Water Bottle (Grey) 3 in Washington in June 2025?
+    expected: { value: 2775.60 }
+  - id: ranking
+    subtype: ranking
+    question: Top 5 customers by revenue in 2025
+    expected:
+      rows:
+        - [Young Outlet 175, 20273.29]
+        - [Lopez Depot 71, 16857.50]
+        - [Miller Shop 183, 16831.38]
+        - [King Shop 10, 16331.12]
+        - [Miller Depot 78, 15909.86]
+  - id: comparison
+    subtype: comparison
+    question: Compare revenue of Retail vs. Wholesale customers in 2025
+    expected:
+      rows:
+        - [Retail, 720582.82]
+        - [Wholesale, 493212.55]
+  - id: relative-period
+    subtype: aggregation
+    question: Revenue last quarter by state
+    note: with ao.clock.fixed-now = 2026-06-30 "last quarter" is 2026-01-01 .. 2026-03-31
+    expected:
+      top_rows:
+        - [Washington, 76595.71]
+        - [Virginia, 64938.13]
+        - [Arizona, 47199.06]
+  - id: value-repair
+    subtype: match_based
+    question: How many wholesale customers are there?
+    note: the stored value is 'Wholesale'; with the defaults the repair happens via check_value_repair
+    expected: { value: 65 }
+  - id: bridge-table
+    subtype: match_based
+    question: Which suppliers deliver the stock item USB Cable (Grey) 2?
+    expected:
+      values: [Green Mart Ltd, Hill Goods Ltd, King Shop Ltd, Wright Traders Ltd]
+  - id: domain-knowledge
+    subtype: domain_knowledge
+    question: Which customer category had the lowest revenue in 2025?
+    expected: { value: Online }
+  - id: numeric-computation
+    subtype: numeric_computation
+    question: What share of 2025 revenue came from Retail customers, in percent?
+    expected: { value: 45.54, tolerance: 0.01 }
+  - id: information
+    subtype: information
+    question: Which tables contain customer data?
+    expected: { mentions: [CUSTOMERS, INVOICES, ORDERS] }
+  - id: unanswerable
+    subtype: unanswerable
+    question: What was the return on ad spend in June 2025?
+    expected: { unconstructable: true, coverage_below: 1.0 }

@@ -1,0 +1,10 @@
+#! New dialect block for Oracle (FR-AGT-03), written in the style of prompts.py::format_dialect_rules.
+**Oracle-specific (STRICT — these will error at execution)**
+- There is no LIMIT clause. Cap rows with FETCH FIRST n ROWS ONLY after ORDER BY (or OFFSET m ROWS FETCH NEXT n ROWS ONLY).
+- Use NVL / COALESCE for NULL replacement, TO_DATE / TO_TIMESTAMP with an explicit format mask for date literals (or DATE 'YYYY-MM-DD'), and TRUNC(date_col, 'MM') / EXTRACT(YEAR FROM date_col) for date parts. There is no DATE_TRUNC.
+- Unquoted identifiers are folded to UPPERCASE. Use names exactly as listed; if a listed name contains lowercase letters, wrap it in double quotes with the exact case.
+- Never write AS between a table and its alias (FROM SALES.ORDERS o, not FROM SALES.ORDERS AS o). Column aliases may use AS.
+- The empty string '' is NULL in Oracle: compare with IS NULL / IS NOT NULL, never = ''.
+- There is no BOOLEAN column type in SQL before 23ai; flags are usually NUMBER(1) or CHAR(1) — compare against the stored values shown in samples.
+- WHERE, GROUP BY and HAVING cannot reference SELECT aliases; repeat the expression or use a subquery/CTE.
+

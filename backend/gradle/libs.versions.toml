@@ -1,0 +1,43 @@
+[versions]
+spring-boot = "4.1.1"
+langchain4j = "1.23.0"
+langchain4j-beta = "1.23.0-beta33"
+jsqlparser = "5.4"
+qdrant-client = "1.20.0"
+springdoc = "3.2.0"
+embedded-postgres = "2.2.2"
+embedded-postgres-binaries = "18.6.0"
+
+[libraries]
+spring-boot-bom = { module = "org.springframework.boot:spring-boot-dependencies", version.ref = "spring-boot" }
+spring-boot-starter-webmvc = { module = "org.springframework.boot:spring-boot-starter-webmvc" }
+spring-boot-starter-jdbc = { module = "org.springframework.boot:spring-boot-starter-jdbc" }
+spring-boot-starter-liquibase = { module = "org.springframework.boot:spring-boot-starter-liquibase" }
+spring-boot-starter-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator" }
+spring-boot-starter-validation = { module = "org.springframework.boot:spring-boot-starter-validation" }
+spring-boot-autoconfigure = { module = "org.springframework.boot:spring-boot-autoconfigure" }
+spring-boot-configuration-processor = { module = "org.springframework.boot:spring-boot-configuration-processor" }
+spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test" }
+spring-boot-starter-webmvc-test = { module = "org.springframework.boot:spring-boot-starter-webmvc-test" }
+jackson-databind = { module = "tools.jackson.core:jackson-databind" }
+jackson-yaml = { module = "tools.jackson.dataformat:jackson-dataformat-yaml" }
+h2 = { module = "com.h2database:h2" }
+postgresql = { module = "org.postgresql:postgresql" }
+ojdbc = { module = "com.oracle.database.jdbc:ojdbc11" }
+mssql = { module = "com.microsoft.sqlserver:mssql-jdbc" }
+langchain4j = { module = "dev.langchain4j:langchain4j", version.ref = "langchain4j" }
+langchain4j-open-ai = { module = "dev.langchain4j:langchain4j-open-ai", version.ref = "langchain4j" }
+langchain4j-jackson3 = { module = "dev.langchain4j:langchain4j-jackson3", version.ref = "langchain4j-beta" }
+jsqlparser = { module = "com.github.jsqlparser:jsqlparser", version.ref = "jsqlparser" }
+qdrant-client = { module = "io.qdrant:client", version.ref = "qdrant-client" }
+springdoc-webmvc-api = { module = "org.springdoc:springdoc-openapi-starter-webmvc-api", version.ref = "springdoc" }
+embedded-postgres = { module = "io.zonky.test:embedded-postgres", version.ref = "embedded-postgres" }
+embedded-postgres-binaries-bom = { module = "io.zonky.test.postgres:embedded-postgres-binaries-bom", version.ref = "embedded-postgres-binaries" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+testcontainers-qdrant = { module = "org.testcontainers:testcontainers-qdrant" }
+testcontainers-oracle = { module = "org.testcontainers:testcontainers-oracle-free" }
+testcontainers-mssql = { module = "org.testcontainers:testcontainers-mssqlserver" }
+testcontainers-junit = { module = "org.testcontainers:testcontainers-junit-jupiter" }
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }

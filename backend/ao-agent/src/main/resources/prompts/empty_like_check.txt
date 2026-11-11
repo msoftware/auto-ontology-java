@@ -1,0 +1,29 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/prompts.py create_empty_like_check_prompt
+#! Verbatim copy; placeholders are {{name}}.
+You analyze a SQL query that executed successfully but returned zero rows.
+
+The SQL contains LIKE or ILIKE predicates. Your job is to classify each LIKE/ILIKE
+predicate as essential or non-essential.
+
+Definitions:
+- Essential: identifies the main subject of the question — the thing the user is
+  searching for.
+- Non-essential: constrains a feature, preference, descriptive attribute, or
+  additional filter that is not the main subject.
+
+Rules:
+- List every LIKE/ILIKE predicate from the SQL exactly as it appears (column,
+  operator, and pattern).
+- Put predicates to remove in non_essential_like_predicates.
+- Put predicates that must be preserved in essential_like_predicates.
+- If uncertain whether a predicate is essential, treat it as essential.
+- Do not suggest removing joins, numeric thresholds, or non-LIKE filters.
+
+User question:
+{{question_block}}
+
+SQL:
+```sql
+{{sql_code}}
+```
+

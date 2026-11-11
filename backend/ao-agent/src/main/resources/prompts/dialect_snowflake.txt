@@ -1,0 +1,11 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/prompts.py _SNOWFLAKE_DIALECT_RULES
+#! Verbatim copy; placeholders are {{name}}.
+**Snowflake-specific (STRICT — these OVERRIDE the generic syntax bans above)**
+- The general rule against `::` casts and LATERAL joins does NOT apply here: Snowflake REQUIRES `::type` casts and `LATERAL FLATTEN` to read VARIANT data.
+- Identifiers are CASE-SENSITIVE when quoted, and Snowflake folds unquoted names to UPPERCASE. The schema above lists the real stored names. Wrap every table and column identifier in double quotes using the EXACT case shown, e.g. `SELECT t."publication_number" FROM "PATENTS"."PUBLICATIONS" AS t`. Never reference a lowercase column unquoted — it will fail as 'invalid identifier'.
+- Aliases you define may stay unquoted; only real table/column names need the exact-case double quotes.
+- VARIANT / ARRAY / OBJECT columns hold nested (semi-structured) data. To read fields inside them, use LATERAL FLATTEN: `FROM "T", LATERAL FLATTEN(input => "T"."assignee_harmonized") f` then access `f.value:"name"::string`. Selecting a VARIANT column directly returns the whole JSON, not scalar fields.
+- Use `:` / `[...]` path syntax for OBJECT fields and `::type` casts on the extracted values (e.g. `f.value:"name"::string`).
+- Date columns loaded from BigQuery are often integer epoch/`YYYYMMDD` NUMBERs, not DATE types — check the sample values and cast/parse accordingly.
+
+

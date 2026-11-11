@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# Profile "qdrant": use a Qdrant service instead of the in-memory store (e.g. --spring.profiles.active=demo,qdrant).
+ao:
+  vector:
+    store: qdrant
+    persist: false
+    qdrant:
+      host: ${QDRANT_HOST:localhost}
+      port: ${QDRANT_PORT:6334}

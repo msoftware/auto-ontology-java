@@ -1,0 +1,21 @@
+{
+  "name": "auto-ontology-frontend",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Quasar frontend of the Auto-Ontology rebuild: component library @jentsch/quasar-ontology and a demo app",
+  "scripts": {
+    "dev": "pnpm --filter ao-demo dev",
+    "build": "pnpm --filter ao-demo build",
+    "typecheck": "pnpm --filter @jentsch/quasar-ontology typecheck",
+    "test": "pnpm --filter @jentsch/quasar-ontology test"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3"
+  },
+  "engines": {
+    "node": ">= 26 || ^24 || ^22.12",
+    "pnpm": ">=9"
+  },
+  "packageManager": "pnpm@12.16.1"
+}

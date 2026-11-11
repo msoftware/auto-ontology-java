@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+# Internal tool WITHOUT authentication: ports are published on 127.0.0.1 only (NFR-SEC-06).
+# Change this deliberately for operation in a protected internal network.
+services:
+  postgres:
+    image: postgres:17.6
+    environment:
+      POSTGRES_DB: auto_ontology
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      retries: 20
+  qdrant:
+    # pinned like the client version (FR-VEC-04), never latest
+    image: qdrant/qdrant:v1.20.0
+    volumes: [qdrant:/qdrant/storage]
+    ports: ["127.0.0.1:6333:6333", "127.0.0.1:6334:6334"]
+  backend:
+    build: { context: ., dockerfile: docker/backend.Dockerfile }
+    depends_on:
+      postgres: { condition: service_healthy }
+      qdrant: { condition: service_started }
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      QDRANT_HOST: qdrant
+      AO_VECTOR_DIMENSIONS: ${AO_VECTOR_DIMENSIONS:-2048}
+      CONNECTION_STRINGS: ${CONNECTION_STRINGS:-}
+      DEFAULT_MODELS_ENDPOINT: ${DEFAULT_MODELS_ENDPOINT:-}
+      DEFAULT_MODELS_API_KEY: ${DEFAULT_MODELS_API_KEY:-}
+      DEFAULT_MODELS_MODEL: ${DEFAULT_MODELS_MODEL:-}
+      EMBED_ENDPOINT: ${EMBED_ENDPOINT:-}
+      EMBED_API_KEY: ${EMBED_API_KEY:-}
+      EMBED_MODEL: ${EMBED_MODEL:-}
+    ports: ["127.0.0.1:8080:8080"]
+  frontend:
+    build: { context: ., dockerfile: docker/frontend.Dockerfile }
+    depends_on: [backend]
+    ports: ["127.0.0.1:9000:80"]
+volumes:
+  pgdata:
+  qdrant:

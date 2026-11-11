@@ -1,0 +1,9 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/prompts.py format_authoritative_evidence
+#! Verbatim copy; placeholders are {{name}}.
+## Authoritative Evidence
+This evidence is critical. The generated SQL MUST follow every instruction in it exactly, even when another approach appears equivalent.
+- Whenever the evidence explains a value or where that value is stored, include the value in the SQL using the stated column, table, filter, and operator. Do not substitute another value or location.
+- Whenever the evidence explains a formula, calculate that exact formula from the stated available tables and columns. Do not replace it with a shortcut or precomputed field. Preserve the evidence's stated order of all formula terms, operands, predicates, and conditions exactly; never reorder them, even when the reordered expression appears equivalent.
+
+Evidence (verbatim):
+{{evidence}}

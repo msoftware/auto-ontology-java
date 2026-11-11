@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# Golden set of the NL charts (section 23.8) on the quasar-dashboard sample data (fixed now 2026-06-30).
+# Compared: dataset, viz_type, metrics, dimensions, filters and time range; order and customize
+# controls are ignored. Host: ./gradlew :ao-dashboard-demo:bootRun
+cases:
+  - question: Umsatz je Region als Balkendiagramm
+    expected: { dataset: sales, viz_type: bar, x_axis: region, metrics: [total_revenue] }
+  - question: Revenue by region as a bar chart
+    expected: { dataset: sales, viz_type: bar, x_axis: region, metrics: [total_revenue] }
+  - question: Monatlicher Umsatz nach Region im letzten Jahr
+    expected: { dataset: sales, viz_type: line, x_axis: order_date, time_grain_sqla: P1M, series: region, time_range: Last year }
+  - question: Anteil der Produktlinien am Umsatz
+    expected: { dataset: sales, viz_type: pie, groupby: product_line, metric: total_revenue }
+  - question: Gesamtumsatz und Entwicklung gegenüber dem Vormonat
+    expected: { dataset: sales, viz_type: big_number, metric: total_revenue, show_trend: true, time_grain_sqla: P1M }
+  - question: Umsatz in Deutschland nach Kanal
+    expected: { dataset: sales, viz_type: bar, x_axis: channel, filters: [{ col: country, op: "==", val: Germany }] }
+  - question: Tägliche Besuche nach Gerät in den letzten 30 Tagen
+    expected: { dataset: web_traffic, viz_type: line, x_axis: ts, time_grain_sqla: P1D, series: device, time_range: Last 30 days }
+  - question: Durchschnittsgehalt je Abteilung, nur Remote
+    expected: { dataset: employees, viz_type: bar, x_axis: department, metrics: [avg_salary], filters: [{ col: remote, op: IS TRUE }] }
+  - question: Umsatz je Region ohne Retouren
+    expected: { dataset: sales, viz_type: bar, x_axis: region, filters: [{ col: is_returned, op: IS FALSE }] }
+  - question: Lagerbestand je Lager und Produktlinie als Kreuztabelle
+    expected: { dataset: inventory, viz_type: pivot_table, groupbyRows: [warehouse], groupbyColumns: [product_line], metrics: [total_stock] }
+  - question: Menge gegen Umsatz je Land
+    expected: { dataset: sales, viz_type: scatter, entity: country, x_metric: { aggregate: SUM, column: quantity }, y_metric: total_revenue }
+  - question: Top 10 Länder nach Umsatz als Tabelle
+    expected: { dataset: sales, viz_type: table, query_mode: aggregate, groupby: [country], orderby_desc: total_revenue, row_limit: 10 }
+  - question: und jetzt als Linie pro Woche
+    follow_up_of: Monatlicher Umsatz nach Region im letzten Jahr
+    expected: { viz_type: line, time_grain_sqla: P1W, keeps: [metrics, series, time_range] }
+  - question: Umsatz pro Mitarbeiter
+    expected: { mode: sql_or_explanation, note: needs sales and employees together; no single dataset answers it }
+  - question: Wie hoch sind die Gehälter je Abteilung?
+    config: { ao.nl-chart.dataset-allowlist: [sales, web_traffic, inventory] }
+    expected: { not_dataset: employees }

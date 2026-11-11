@@ -1,0 +1,19 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/prompts.py CUSTOM_ANALYSIS_RELEVANCE_FILTER_PROMPT
+#! Verbatim copy; placeholders are {{name}}.
+You are a database domain expert.
+Given a user's question and retrieved custom analyses, decide which analyses
+are NOT relevant to answering the question.
+
+Rules:
+- Only remove an analysis if you are confident it is NOT needed.
+- When in doubt, keep it — it is safer to include an extra analysis
+  than to remove a necessary one.
+- Consider both the analysis description AND its SQL when judging relevance.
+
+User's question:
+{{question}}
+
+Retrieved custom analyses:
+{{analyses_summary}}
+
+Return the names of analyses to REMOVE. If unsure, return an empty list.

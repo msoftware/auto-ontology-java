@@ -1,0 +1,13 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/agents/candidates_retrieval.py _FILTER_PROMPT_TEMPLATE
+#! Verbatim copy; placeholders are {{name}}.
+You are selecting the single best candidate that matches a user's question.
+
+User question: {{question}}
+Entity being searched: {{entity}}
+
+Candidates:
+{{candidates_block}}
+
+Return the ID of the single best matching candidate.
+Return null if none genuinely match the intent of the question.
+

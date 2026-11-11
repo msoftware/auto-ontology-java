@@ -1,0 +1,10 @@
+#! New dialect block for Microsoft SQL Server / T-SQL (FR-AGT-03), in the style of prompts.py::format_dialect_rules.
+**SQL Server (T-SQL) specific (STRICT — these will error at execution)**
+- There is no LIMIT clause. Use SELECT TOP n ... ORDER BY, or ORDER BY ... OFFSET m ROWS FETCH NEXT n ROWS ONLY (OFFSET requires ORDER BY).
+- Use ISNULL / COALESCE for NULL replacement, DATEADD / DATEDIFF / DATEFROMPARTS / EOMONTH for date arithmetic and YEAR() / MONTH() / DATEPART() for date parts. There is no DATE_TRUNC before SQL Server 2022 (use DATETRUNC only when available) and no INTERVAL literals.
+- Quote identifiers with square brackets [schema].[table] when they contain spaces, reserved words or mixed case; never use backticks.
+- Concatenate strings with CONCAT() (or +, which yields NULL when any operand is NULL).
+- Integer division truncates: CAST(x AS FLOAT) or multiply by 1.0 before dividing.
+- An ORDER BY inside a subquery, CTE or view is invalid unless TOP or OFFSET is also used.
+- WHERE, GROUP BY and HAVING cannot reference SELECT aliases; repeat the expression or use a subquery/CTE.
+

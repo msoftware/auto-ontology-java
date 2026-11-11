@@ -1,0 +1,34 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/visualization/prompts.py VISUALIZATION_PROMPT
+#! Verbatim copy; placeholders are {{name}}.
+I have a dataset resulting from the following SQL query:
+{{sql}}
+
+The natural language question corresponding to this query is:
+{{question}}
+
+The dataset has the following structure:
+Size: {{df_size}}
+Columns: {{df_columns}}
+
+Based on this dataset, propose the SINGLE best visualization for the question.
+
+IMPORTANT:
+- Stick strictly to the original question. Do not add proportion, percentage, or distribution analysis unless explicitly requested.
+- If the natural language question asks for a specific visualization type, use that type.
+- Column names in x/y/hue MUST be exact matches from Columns above.
+- Do NOT return both a bar and a line for the same data — pick one.
+
+Preferences and guidelines:
+- Single scalar or one-row / one-entity result: use plot_type "kpi" (x/y optional).
+- Time-series (date/time or ordered numeric on X): prefer line. Prefer area when the question is about cumulative totals over time.
+- Pure categorical X (few discrete labels): do NOT use line. Prefer bar; use hbar for rankings or long category labels; use grouped-bar when a hue column splits series.
+- Signed change / gain-loss comparisons: use delta.
+- Ordinal categorical X with many categories (> 10): line is acceptable; otherwise prefer bar/hbar.
+- Never return a line chart for a single value.
+- CRITICAL: Do NOT modify or reinterpret the original question. ONLY visualize exactly what was asked. If the question asks for individual values, counts, or totals, do NOT create proportion/percentage/share charts.
+
+Output requirements:
+- Return exactly ONE plot in the "plots" array (the best fit).
+- Each plot needs plot_type, title, and (except kpi) x and y column names.
+- hue may be null when not needed.
+

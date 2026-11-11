@@ -1,0 +1,13 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/prompts.py _SQLITE_DIALECT_RULES
+#! Verbatim copy; placeholders are {{name}}.
+**SQLite-specific (STRICT — these will error at execution)**
+- No LEAST / GREATEST. Use scalar MIN(a, b, …) / MAX(a, b, …) instead.
+- No spatial / PostGIS functions (ST_Distance, ST_X, ST_Y, ST_DWithin, POINT, distance(), …). Compute great-circle distance by hand with the Haversine formula using sin/cos/acos/radians/sqrt (all available).
+- No statistical aggregates (STDDEV, STDDEV_POP, VARIANCE, VAR_POP, PERCENTILE_CONT, PERCENTILE_DISC, MEDIAN, CORR, REGR_*). Derive them with plain arithmetic (AVG, SUM, COUNT, window functions).
+- No STRING_AGG / ARRAY_AGG — use GROUP_CONCAT. No generate_series.
+- No EXTRACT(...) / DATE_TRUNC / DATE_PART / AGE / NOW() / INTERVAL literals. Use strftime(), date(), datetime() for all date/time work.
+- No :: casts and no ILIKE. Use CAST(x AS type); LIKE is case-insensitive for ASCII.
+- Coordinates and other composite columns are stored as TEXT, not JSON or arrays. Do NOT use json_extract on non-JSON text — inspect the value shape and parse with substr()/instr()/CAST as needed.
+- Prefer built-in aggregate/math functions and window functions only.
+
+

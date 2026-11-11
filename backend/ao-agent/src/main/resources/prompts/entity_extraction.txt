@@ -1,0 +1,60 @@
+#! Derived from NVIDIA Auto-Ontology (Apache-2.0), retrieval/text_to_sql/prompts.py create_entity_extraction_prompt
+#! Verbatim copy; placeholders are {{name}}.
+You are a database schema analyst. Given a question, populate the field "required_entity_name" with 1–{{max_entities}} noun phrases that correspond to database tables, columns, or relationships.
+
+Preserve the exact casing of terms as they appear in the question. Do not lowercase,
+uppercase, or normalize them.
+
+Guidelines for what to include in required_entity_name:
+- Subject nouns and domain terms ("invoice", "customer", "shipment")
+- Qualified entity phrases that combine a subject with its relevant action or attribute
+  ("order shipment", "employee hire", "ticket resolution")
+- Filter-item rule: when several words together describe a single item the user wants to
+  filter or search for, keep them in one phrase. Do not split modifier, noun, and purpose
+  of the same filter item into separate entries.
+  Example: "waterproof hiking tent for family camping" → ["waterproof hiking tent for family camping"],
+  not ["waterproof hiking tent", "family camping"].
+  This rule applies only to one filterable item. Do not merge separate retrieval targets
+  (e.g. a subject entity and a time dimension still get separate entries when appropriate).
+- Keep names and descriptive text that identify something: brand names, product names,
+  vendor names, categories, and other named constants (e.g. "Salomon Speedcross", "Grip Rx").
+- For interrogative words (who/what/which/whose), resolve to the implied entity type
+  AND, if the question contains a qualifying descriptor, include it twice: once alone
+  and once combined with the resolved type.
+  Example: "who are the active assignees" → ["assignee", "active assignee"]
+
+Guidelines for what to exclude from required_entity_name:
+- Bare action verbs ("submitted", "approved", "closed", "assigned")
+- Numeric values: counts, amounts, prices, years, and other number literals
+  (e.g. 1000, $150, 2023, Q2) — omit these from phrases; they are not entity names
+- Date/time values when they are numeric or calendar literals, not named descriptions
+- Aggregation indicators ("count", "total", "average", "sum", "min", "max")
+  when standing alone, not part of a measurable phrase
+- Status and filter adjectives when standing alone ("open", "active", "high-priority")
+
+Date rule: When a question references a time-qualified event, collapse subject + action
++ granularity into one compact phrase ending with "date". Do NOT emit the verb, a
+column-name guess, the date value, and the granularity as separate entries.
+  If a granularity is mentioned (quarter, month, week, year, day), include it before "date".
+  If no granularity is mentioned, end with just "date".
+  Example: "invoices closed in Q2" → required_entity_name: ["invoice", "invoice closure quarter date"]
+  Example: "orders placed last year" → required_entity_name: ["order", "order placement date"]
+
+Examples:
+  Q: "How many shipments were delivered last month?"
+  → required_entity_name: ["shipment", "shipment delivery month date"]
+
+  Q: "What is the average salary of engineers hired in 2023?"
+  → required_entity_name: ["salary", "engineer", "engineer hire date"]
+
+  Q: "Who are the reviewers assigned to pending tasks?"
+  → required_entity_name: ["task", "reviewer", "assigned reviewer"]
+
+  Q: "Find a waterproof hiking tent for family camping."
+  → required_entity_name: ["waterproof hiking tent for family camping"]
+
+  Q: "Recommend trail running shoes similar to Salomon Speedcross."
+  → required_entity_name: ["trail running shoes similar to Salomon Speedcross"]
+
+Question: {{question}}
+
