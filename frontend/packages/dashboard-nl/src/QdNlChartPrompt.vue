@@ -99,23 +99,29 @@ function onKey(e: KeyboardEvent) {
 }
 
 function variant(vizType: string) {
-  if (suggestion.value) void ask(`${question.value} — als ${vizType}`, { ...suggestion.value.params, viz_type: vizType })
+  if (suggestion.value) void ask(t('qdnl.asVariant', { question: question.value, vizType }), { ...suggestion.value.params, viz_type: vizType })
 }
 
 async function save() {
   const s = suggestion.value
   if (!s || s.mode !== 'semantic' || !s.dataset_id || !s.viz_type || !previewParams.value) return
-  const chart = await nl.saveChart({
-    slice_name: saveName.value,
-    description: saveDescription.value || null,
-    viz_type: s.viz_type,
-    datasource_id: s.dataset_id,
-    datasource_type: 'table',
-    params: previewParams.value,
-    query_context: (s as unknown as { query_context?: unknown }).query_context ?? null,
-    ...(props.dashboardId ? { dashboards: [props.dashboardId] } : {}),
-  })
-  emit('saved', chart)
+  error.value = null
+  try {
+    const chart = await nl.saveChart({
+      slice_name: saveName.value,
+      description: saveDescription.value || null,
+      viz_type: s.viz_type,
+      datasource_id: s.dataset_id,
+      datasource_type: 'table',
+      params: previewParams.value,
+      query_context: (s as unknown as { query_context?: unknown }).query_context ?? null,
+      ...(props.dashboardId ? { dashboards: [props.dashboardId] } : {}),
+    })
+    emit('saved', chart)
+  } catch (e) {
+    // a rejected save (validation of the dashboard API, network) is shown like any other error
+    error.value = (e as Error).message
+  }
 }
 
 function openBuilder() {

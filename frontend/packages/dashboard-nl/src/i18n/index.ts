@@ -22,6 +22,7 @@ const en = {
     showSql: 'Show SQL',
     empty: 'Ask for a chart in your own words.',
     error: 'Error: {message}',
+    asVariant: '{question} — as {vizType}',
   },
 }
 const de: typeof en = {
@@ -47,6 +48,7 @@ const de: typeof en = {
     showSql: 'SQL anzeigen',
     empty: 'Beschreiben Sie den gewünschten Chart in eigenen Worten.',
     error: 'Fehler: {message}',
+    asVariant: '{question} — als {vizType}',
   },
 }
 export const messages = { en, de }

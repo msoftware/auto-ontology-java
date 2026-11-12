@@ -8,7 +8,7 @@
     "dev": "pnpm --filter ao-demo dev",
     "build": "pnpm --filter ao-demo build",
     "typecheck": "pnpm --filter @jentsch/quasar-ontology typecheck",
-    "test": "pnpm --filter @jentsch/quasar-ontology test"
+    "test": "pnpm --filter @jentsch/quasar-ontology --filter @jentsch/quasar-dashboard-nl test"
   },
   "devDependencies": {
     "typescript": "~5.9.3"

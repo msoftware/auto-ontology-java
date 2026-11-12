@@ -1,5 +1,10 @@
 {
   "extends": "../../tsconfig.base.json",
-  "compilerOptions": { "types": ["vite/client"] },
+  "compilerOptions": {
+    "types": ["vite/client"],
+    "paths": {
+      "@jentsch/quasar-dashboard": ["../../../../quasar-dashboard/packages/dashboard/src/index.ts"]
+    }
+  },
   "include": ["src/**/*", "test/**/*"]
 }

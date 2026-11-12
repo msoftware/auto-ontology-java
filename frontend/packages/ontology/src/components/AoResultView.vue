@@ -24,6 +24,8 @@ const columns = computed(() =>
   Object.keys(props.rows?.[0] ?? {}).map((c) => ({ name: c, label: c, field: c, align: 'left' as const, sortable: true })),
 )
 const result = computed(() => rowsToQueryResult(props.rows ?? [], props.sql ?? undefined))
+// QTable needs a unique key per row; result rows have none (and may repeat), so the position is the key
+const tableRows = computed(() => (props.rows ?? []).map((r, i) => ({ ...r, __index: i })))
 
 function downloadCsv() {
   const blob = new Blob([toCsv(props.rows ?? [])], { type: 'text/csv' })
@@ -31,7 +33,8 @@ function downloadCsv() {
   a.href = URL.createObjectURL(blob)
   a.download = 'result.csv'
   a.click()
-  URL.revokeObjectURL(a.href)
+  // the download starts asynchronously: revoking in the same tick can cancel it
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000)
 }
 </script>
 
@@ -70,7 +73,7 @@ function downloadCsv() {
       dense
       flat
       bordered
-      :rows="rows"
+      :rows="tableRows"
       :columns="columns"
       :rows-per-page-options="[10, 25, 100, 0]"
       row-key="__index"

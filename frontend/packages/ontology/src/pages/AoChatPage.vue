@@ -5,7 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { useAo } from '../plugin'
 import type { AoEvent } from '../api'
 import AoResultView from '../components/AoResultView.vue'
-import { entityLinks, parseChartBlocks, type ChartBlock } from '../results'
+import { entityLinks, newUuid, parseChartBlocks, type ChartBlock } from '../results'
 
 /** Chat page (FR-FE-02 /chat): conversations, live steps, SQL, results, charts, cancel, reattach. */
 const props = defineProps<{ focus?: string | null; suggestions?: string[] }>()
@@ -76,8 +76,9 @@ async function openConversation(id: string) {
     }
   }
   turns.value = list
-  // reattach to a run that is still active (watch replays from the start)
-  const last = list[list.length - 1]
+  // reattach to a run that is still active (watch replays from the start). The turn is taken from
+  // `turns.value`: only the reactive proxy makes the replayed steps and the answer appear.
+  const last = turns.value[turns.value.length - 1]
   if (last && last.answer === undefined) {
     last.running = true
     last.steps = []
@@ -112,18 +113,22 @@ async function consume(
   run: (onEvent: (e: AoEvent) => void, signal: AbortSignal) => Promise<void>,
   turn: Turn,
 ) {
-  abort = new AbortController()
+  // a stream that is still open belongs to another conversation: it must not write into this one
+  abort?.abort()
+  const controller = new AbortController()
+  abort = controller
   try {
     await run((e) => {
       handle(turn, e)
       void nextTick(() => scroller.value?.scrollTo({ top: scroller.value.scrollHeight }))
-    }, abort.signal)
+    }, controller.signal)
   } catch (err) {
     if (!(err instanceof DOMException && err.name === 'AbortError')) turn.error = (err as Error).message
   } finally {
     turn.running = false
-    abort = null
-    await loadConversations()
+    // only the own controller: a newer stream may already have replaced it
+    if (abort === controller) abort = null
+    await loadConversations().catch(() => undefined)
   }
 }
 
@@ -132,7 +137,7 @@ async function send(text?: string) {
   if (!q || running.value) return
   question.value = ''
   if (!current.value) {
-    current.value = crypto.randomUUID()
+    current.value = newUuid()
     emit('focus', current.value)
   }
   const turn: Turn = { question: q, steps: [], running: true }

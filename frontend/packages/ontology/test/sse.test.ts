@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { describe, expect, it } from 'vitest'
 import { createSseParser } from '../src/api'
-import { entityLinks, parseChartBlocks, rowsToQueryResult, toCsv } from '../src/results'
+import { entityLinks, newUuid, parseChartBlocks, rowsToQueryResult, toCsv } from '../src/results'
 
 describe('SSE parser (FR-FE-03)', () => {
   it('handles events split across chunks and stops at [DONE]', () => {
@@ -25,5 +25,19 @@ describe('results', () => {
     expect(parseChartBlocks('```chart\n{"viz_type":"bar","params":{},"mode":"sql"}\n```')[0]?.viz_type).toBe('bar')
     expect(toCsv([{ a: 'x,y', b: 1 }])).toBe('a,b\n"x,y",1')
     expect(entityLinks('Total [[[Revenue/abc]]] now')).toEqual([{ text: 'Total ' }, { text: 'Revenue', id: 'abc' }, { text: ' now' }])
+  })
+  it('creates conversation ids the backend accepts, also without crypto.randomUUID', () => {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    expect(newUuid()).toMatch(uuid)
+    const original = globalThis.crypto.randomUUID
+    // plain http on a host other than localhost: the browser offers no randomUUID
+    Object.defineProperty(globalThis.crypto, 'randomUUID', { value: undefined, configurable: true })
+    try {
+      const a = newUuid()
+      expect(a).toMatch(uuid)
+      expect(newUuid()).not.toBe(a)
+    } finally {
+      Object.defineProperty(globalThis.crypto, 'randomUUID', { value: original, configurable: true })
+    }
   })
 })

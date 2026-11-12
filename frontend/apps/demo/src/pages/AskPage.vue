@@ -10,7 +10,17 @@ import { openInBuilder } from '../open-in-builder'
 const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
-const current = route.query.params ? (JSON.parse(String(route.query.params)) as Record<string, unknown>) : null
+const current = parseParams(route.query.params)
+
+function parseParams(raw: unknown): Record<string, unknown> | null {
+  if (!raw) return null
+  try {
+    const v: unknown = JSON.parse(String(raw))
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+  } catch {
+    return null
+  }
+}
 
 async function open(p: { datasetId: number; vizType: string; params: Record<string, unknown> }) {
   await openInBuilder(p)

@@ -3,7 +3,7 @@
 export { createQuasarOntology, useAo, AO_CLIENT } from './plugin'
 export { createAoClient, createSseParser, AoApiError } from './api'
 export type { QuasarOntologyOptions, AoClient, AoEvent } from './api'
-export { rowsToQueryResult, parseChartBlocks, toCsv, entityLinks } from './results'
+export { rowsToQueryResult, parseChartBlocks, toCsv, entityLinks, newUuid } from './results'
 export type { ChartBlock } from './results'
 export { messages as aoMessages } from './i18n'
 export { default as AoChatPage } from './pages/AoChatPage.vue'

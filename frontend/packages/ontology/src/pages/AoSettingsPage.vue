@@ -56,6 +56,15 @@ async function run<T>(fn: () => Promise<T>, ok?: string): Promise<T | undefined>
 }
 
 async function load() {
+  try {
+    await loadSection()
+  } catch (e) {
+    // shown in the page instead of an unhandled rejection (e.g. backend not reachable)
+    error.value = (e as Error).message
+  }
+}
+
+async function loadSection() {
   switch (section.value) {
     case 'connections':
       connections.value = (await ao.get<{ data: Row[] }>('/connections')).data
@@ -158,11 +167,13 @@ async function toggleZone(z: Row) {
   await load()
 }
 async function exportModel() {
-  const blob = await ao.download('/model/export', { databases: [], format: 'auto_ontology', include_ontology: false })
+  const blob = await run(() => ao.download('/model/export', { databases: [], format: 'auto_ontology', include_ontology: false }))
+  if (!blob) return
   const a = document.createElement('a')
   a.href = URL.createObjectURL(blob)
   a.download = 'auto-ontology-model.yaml'
   a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000)
 }
 async function importModel() {
   if (!importFile.value || !window.confirm(t('ao.settings.importConfirm'))) return

@@ -83,13 +83,19 @@ export function createNlClient(o: QuasarDashboardNlOptions = {}): NlClient {
       }
       if (signal) init.signal = signal
       const resp = await f(`${base}${prefix}/suggest`, init)
-      if (!resp.ok || !resp.body) await json(resp)
-      const reader = resp.body!.getReader()
+      if (!resp.ok) await json(resp)
+      if (!resp.body) throw new Error('The server sent no event stream')
+      const reader = resp.body.getReader()
       const decoder = new TextDecoder()
       const push = parseSse(onEvent)
       for (;;) {
         const { value, done } = await reader.read()
-        if (done || push(decoder.decode(value, { stream: true }))) break
+        if (done) break
+        if (push(decoder.decode(value, { stream: true }))) {
+          // [DONE]: release the connection instead of leaving the rest of the body unread
+          await reader.cancel()
+          break
+        }
       }
     },
     async datasets() {

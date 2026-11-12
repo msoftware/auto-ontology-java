@@ -57,9 +57,19 @@ async function patch(body: Row) {
   }
 }
 
+/** Runs an action on the selected term and shows a failure in the page. */
+async function act(fn: () => Promise<unknown>) {
+  error.value = null
+  try {
+    await fn()
+    if (selected.value) await open(String(selected.value.id))
+  } catch (e) {
+    error.value = (e as Error).message
+  }
+}
+
 async function patchAttr(a: Row, body: Row) {
-  await ao.patch(`/terms/${selected.value!.id}/column-attributes/${a.id}`, body)
-  await open(String(selected.value!.id))
+  await act(() => ao.patch(`/terms/${selected.value!.id}/column-attributes/${a.id}`, body))
 }
 
 function newSql() {
@@ -85,8 +95,12 @@ async function validateSql() {
 
 async function suggest() {
   if (!sqlForm.value.id) return
-  const r = await ao.get<{ data: { description_suggestion: string } }>(`/sql-attributes/${sqlForm.value.id}/description-suggestion`)
-  sqlForm.value.description = r.data.description_suggestion
+  try {
+    const r = await ao.get<{ data: { description_suggestion: string } }>(`/sql-attributes/${sqlForm.value.id}/description-suggestion`)
+    sqlForm.value.description = r.data.description_suggestion
+  } catch (e) {
+    sqlMessage.value = (e as Error).message
+  }
 }
 
 async function saveSql() {
@@ -104,14 +118,12 @@ async function saveSql() {
 }
 
 async function certifySql(a: Row) {
-  await ao.patch(`/sql-attributes/${a.id}`, { certified: !a.certified })
-  await open(String(selected.value!.id))
+  await act(() => ao.patch(`/sql-attributes/${a.id}`, { certified: !a.certified }))
 }
 
 async function deleteSql(a: Row) {
   if (!window.confirm(String(a.name))) return
-  await ao.del(`/sql-attributes/${a.id}`)
-  await open(String(selected.value!.id))
+  await act(() => ao.del(`/sql-attributes/${a.id}`))
 }
 
 const certColor = (c: unknown) => (c === 'certified' ? 'positive' : c === 'partial' ? 'warning' : 'grey')
