@@ -94,33 +94,40 @@ public class ChatService {
         }
         Run run = new Run(conv);
         if (conv != null) {
-            Run existing = runs.get(conv);
-            if (existing != null && !existing.done) {
-                if (existing.clientConnected) {
-                    throw new ApiException(HttpStatus.CONFLICT, "Conversation in progress");
+            // check and replace as one step: two requests for one conversation must not both start
+            synchronized (runs) {
+                Run existing = runs.get(conv);
+                if (existing != null && !existing.done) {
+                    if (existing.clientConnected) {
+                        throw new ApiException(HttpStatus.CONFLICT, "Conversation in progress");
+                    }
+                    // an orphaned run is displaced by a new request
+                    existing.token.cancel();
                 }
-                // an orphaned run is displaced by a new request
-                existing.token.cancel();
+                runs.put(conv, run);
             }
-            runs.put(conv, run);
         }
-        SseEmitter emitter = subscribe(run, true);
+        SseEmitter emitter = subscribe(run);
         Thread.ofVirtual().name("ao-chat-" + (conv == null ? "stateless" : conv)).start(() -> execute(run, req, source));
         return emitter;
     }
 
-    private SseEmitter subscribe(Run run, boolean owner) {
+    private SseEmitter subscribe(Run run) {
         SseEmitter emitter = new SseEmitter(TIMEOUT_MS);
+        attach(run, emitter);
+        run.subscribers.add(emitter);
+        return emitter;
+    }
+
+    /**
+     * Life-cycle callbacks and keep-alive of one subscriber (the requesting client or a watcher).
+     * The run counts as connected while at least one subscriber is left.
+     */
+    private void attach(Run run, SseEmitter emitter) {
         Runnable gone = () -> {
             run.subscribers.remove(emitter);
-            if (owner) {
-                run.clientConnected = false;
-            }
+            run.clientConnected = !run.subscribers.isEmpty();
         };
-        emitter.onCompletion(gone);
-        emitter.onTimeout(gone);
-        emitter.onError(e -> gone.run());
-        run.subscribers.add(emitter);
         // SSE comments in idle phases keep proxies from closing the connection
         ScheduledFuture<?> ping = pinger.scheduleAtFixedRate(() -> {
             try {
@@ -130,31 +137,41 @@ public class ChatService {
                 throw new IllegalStateException("closed");
             }
         }, 15, 15, TimeUnit.SECONDS);
-        emitter.onCompletion(() -> ping.cancel(false));
-        return emitter;
+        // SseEmitter keeps exactly one completion callback: a second onCompletion() replaces the first
+        emitter.onCompletion(() -> {
+            ping.cancel(false);
+            gone.run();
+        });
+        emitter.onTimeout(gone);
+        emitter.onError(e -> gone.run());
     }
 
+    /** Buffer and delivery under the run's monitor, so that {@link #watch} never misses an event. */
     private void emit(Run run, Map<String, Object> event) {
-        run.buffer.add(event);
         String json = Json.write(event);
-        for (SseEmitter e : run.subscribers) {
-            try {
-                e.send(SseEmitter.event().data(" " + json, MediaType.TEXT_PLAIN));
-            } catch (IOException | IllegalStateException ex) {
-                run.subscribers.remove(e);
-                run.clientConnected = !run.subscribers.isEmpty();
+        synchronized (run) {
+            run.buffer.add(event);
+            for (SseEmitter e : run.subscribers) {
+                try {
+                    e.send(SseEmitter.event().data(" " + json, MediaType.TEXT_PLAIN));
+                } catch (IOException | IllegalStateException ex) {
+                    run.subscribers.remove(e);
+                    run.clientConnected = !run.subscribers.isEmpty();
+                }
             }
         }
     }
 
     private void finish(Run run) {
-        run.done = true;
-        for (SseEmitter e : run.subscribers) {
-            try {
-                e.send(SseEmitter.event().data(" [DONE]", MediaType.TEXT_PLAIN));
-                e.complete();
-            } catch (IOException | IllegalStateException ex) {
-                // client already gone
+        synchronized (run) {
+            run.done = true;
+            for (SseEmitter e : run.subscribers) {
+                try {
+                    e.send(SseEmitter.event().data(" [DONE]", MediaType.TEXT_PLAIN));
+                    e.complete();
+                } catch (IOException | IllegalStateException ex) {
+                    // client already gone
+                }
             }
         }
         if (run.conversationId != null) {
@@ -292,18 +309,25 @@ public class ChatService {
             return e;
         }
         SseEmitter emitter = new SseEmitter(TIMEOUT_MS);
+        // emit() and finish() take the same monitor: replay and subscription are one step
         synchronized (run) {
-            for (Map<String, Object> ev : run.buffer) {
-                try {
+            try {
+                for (Map<String, Object> ev : run.buffer) {
                     emitter.send(SseEmitter.event().data(" " + Json.write(ev), MediaType.TEXT_PLAIN));
-                } catch (IOException ex) {
+                }
+                if (run.done) {
+                    // finished between the lookup and here: nobody would ever send [DONE] otherwise
+                    emitter.send(SseEmitter.event().data(" [DONE]", MediaType.TEXT_PLAIN));
+                    emitter.complete();
                     return emitter;
                 }
+            } catch (IOException | IllegalStateException ex) {
+                return emitter;
             }
+            attach(run, emitter);
             run.subscribers.add(emitter);
             run.clientConnected = true;
         }
-        emitter.onCompletion(() -> run.subscribers.remove(emitter));
         return emitter;
     }
 

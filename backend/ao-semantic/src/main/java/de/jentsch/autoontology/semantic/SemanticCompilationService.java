@@ -60,6 +60,9 @@ public class SemanticCompilationService implements SmartLifecycle {
     private volatile CancellationToken current;
     private volatile ScheduledFuture<?> next;
     private volatile boolean lifecycle;
+    /** Guarded by {@code this}: a scheduled pass is executing / a trigger arrived meanwhile. */
+    private boolean inProgress;
+    private boolean rerunRequested;
 
     public SemanticCompilationService(SemanticCompiler compiler, ConnectionService connections, CatalogRepository catalog,
             SemanticRepository semantic, HistoryRepository history, RuntimeSettings settings, VectorStore vectors,
@@ -89,8 +92,16 @@ public class SemanticCompilationService implements SmartLifecycle {
         return running.get();
     }
 
-    /** Non-blocking trigger (internal; the public API triggers by enabling the flag). */
+    /**
+     * Non-blocking trigger (internal; the public API triggers by enabling the flag). A trigger
+     * that arrives while a scheduled pass is executing is only noted and honoured right after it;
+     * a second scheduled task would start a second timer chain that never ends.
+     */
     public synchronized void trigger() {
+        if (inProgress) {
+            rerunRequested = true;
+            return;
+        }
         if (next != null) {
             next.cancel(false);
         }
@@ -98,12 +109,20 @@ public class SemanticCompilationService implements SmartLifecycle {
     }
 
     private void scheduledRun() {
+        synchronized (this) {
+            inProgress = true;
+        }
         try {
             runNow();
+        } catch (RuntimeException e) {
+            log.error("Scheduled semantic compilation failed", e);
         } finally {
             synchronized (this) {
-                if (lifecycle && schedulerEnabled) {
-                    next = executor.schedule(this::scheduledRun, interval.toMillis(), TimeUnit.MILLISECONDS);
+                inProgress = false;
+                boolean rerun = rerunRequested;
+                rerunRequested = false;
+                if (lifecycle && (rerun || schedulerEnabled)) {
+                    next = executor.schedule(this::scheduledRun, rerun ? 0 : interval.toMillis(), TimeUnit.MILLISECONDS);
                 }
             }
         }
@@ -121,10 +140,12 @@ public class SemanticCompilationService implements SmartLifecycle {
         }
         CancellationToken token = new CancellationToken();
         current = token;
-        String hid = history.start(null, time.now());
+        String hid = null;
         boolean ok = true;
         List<String> summaries = new ArrayList<>();
         try {
+            // inside the try: a store error here must not leave "running" set forever
+            hid = history.start(null, time.now());
             for (ConnectionSpec spec : connections.answeringConnections()) {
                 token.check();
                 Optional<Map<String, Object>> db = catalog.databaseByName(spec.name());
@@ -143,9 +164,15 @@ public class SemanticCompilationService implements SmartLifecycle {
             summaries.add("failed: " + e.getMessage());
             log.error("Semantic compilation failed", e);
         } finally {
-            history.finish(hid, ok, String.join("; ", summaries), time.now());
             current = null;
             running.set(false);
+            if (hid != null) {
+                try {
+                    history.finish(hid, ok, String.join("; ", summaries), time.now());
+                } catch (RuntimeException e) {
+                    log.warn("Compilation history could not be written: {}", e.getMessage());
+                }
+            }
         }
         // failures of these stages never mark the compilation as failed (NFR-REL-01)
         try {
@@ -179,8 +206,20 @@ public class SemanticCompilationService implements SmartLifecycle {
     /**
      * Reset (reset_semantic_layer_and_recompile): abort, wait, delete the semantic layer of all or
      * one database with its embeddings, then recompile asynchronously.
+     *
+     * @param databaseName {@code null} resets every database; an unknown name resets nothing
+     * @return false when {@code databaseName} is given but not in the catalog
      */
-    public void reset(String databaseName) {
+    public boolean reset(String databaseName) {
+        String dbId = null;
+        if (databaseName != null) {
+            // resolved first: an unknown name must never fall through to "reset everything"
+            dbId = catalog.databaseByName(databaseName).map(r -> (String) r.get("id")).orElse(null);
+            if (dbId == null) {
+                log.warn("Semantic reset skipped: database {} is not in the catalog", databaseName);
+                return false;
+            }
+        }
         abort();
         long deadline = System.currentTimeMillis() + 120_000;
         while (running.get() && System.currentTimeMillis() < deadline) {
@@ -188,14 +227,13 @@ public class SemanticCompilationService implements SmartLifecycle {
                 Thread.sleep(100);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return;
+                return false;
             }
         }
-        String dbId = databaseName == null ? null
-                : catalog.databaseByName(databaseName).map(r -> (String) r.get("id")).orElse(null);
         semantic.deleteSemanticLayer(dbId);
         vectors.deleteByFilter(VectorStore.SEMANTIC_LAYER, databaseName, null);
         trigger();
+        return true;
     }
 
     /** GET /api/semantic-compilation/status. */

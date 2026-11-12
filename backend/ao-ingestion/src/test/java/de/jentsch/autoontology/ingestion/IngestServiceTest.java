@@ -41,6 +41,7 @@ class IngestServiceTest {
     private IngestService ingest;
     private VectorStore vectors;
     private GovernanceRepository governance;
+    private SemanticRepository semantic;
     private RuntimeSettings settings;
 
     @BeforeEach
@@ -80,10 +81,11 @@ class IngestServiceTest {
         vectors = new InMemoryVectorStore("", 64, null);
         vectors.ensureCollections();
         ConnectionService connections = new ConnectionService(props, catalog, null, time);
-        ingest = new IngestService(connections, new CatalogWriter(catalog,
-                new TransactionTemplate(new DataSourceTransactionManager(store))), catalog,
+        semantic = new SemanticRepository(jdbc);
+        ingest = new IngestService(connections, new CatalogWriter(catalog, semantic,
+                new TransactionTemplate(new DataSourceTransactionManager(store))), catalog, semantic,
                 new DataLayerEmbedder(catalog, new HashEmbedder(64), vectors), vectors, settings, time);
-        ingest.addStage(new PiiDetection(catalog, new SemanticRepository(jdbc), governance, settings,
+        ingest.addStage(new PiiDetection(catalog, semantic, governance, settings,
                 CurrentUser.fixed("local", "Local"), time, jdbc));
     }
 
@@ -121,6 +123,76 @@ class IngestServiceTest {
         assertThat(vectors.ids(VectorStore.DATA_LAYER, "demo_sales")).isEmpty();
     }
 
+    /** Dropped columns and tables take their ColumnAttributes along; a deleted database its Terms. */
+    @Test
+    void semanticLayerFollowsTheCatalog() {
+        Instant now = Instant.parse("2026-06-30T00:00:00Z");
+        IngestService.Result r = ingest.run(spec());
+        Map<String, Object> customers = catalog.tablesOfDatabase(r.databaseId()).stream()
+                .filter(t -> "CUSTOMERS".equals(t.get("name"))).findFirst().orElseThrow();
+        String tableId = (String) customers.get("id");
+        Map<String, String> columnIds = new java.util.HashMap<>();
+        catalog.columnsOfTable(tableId).forEach(c -> columnIds.put((String) c.get("name"), (String) c.get("id")));
+        String termId = semantic.mergeTerm("Customer", "A customer", List.of(), "semantic", now);
+        semantic.linkTableTerm(tableId, termId);
+        String emailAttr = semantic.mergeColumnAttribute("Email", "", "VARCHAR", "EMAIL", "Customer", termId, tableId,
+                columnIds.get("EMAIL"), now);
+        String nameAttr = semantic.mergeColumnAttribute("Customer Name", "", "VARCHAR", "CUSTOMER_NAME", "Customer",
+                termId, tableId, columnIds.get("CUSTOMER_NAME"), now);
+        float[] vector = new HashEmbedder(64).embedQuery("email");
+        vectors.upsert(VectorStore.SEMANTIC_LAYER, List.of(new VectorStore.VectorRecord(emailAttr, "Email",
+                "ColumnAttribute", "Email", "demo_sales", Map.of("name", "Email"), vector)));
+
+        JdbcClient.create(source).sql("ALTER TABLE SALES.CUSTOMERS DROP COLUMN EMAIL").update();
+        ingest.run(spec());
+        assertThat(semantic.attributesOfTerm(termId)).extracting(a -> a.get("id")).containsExactly(nameAttr);
+        assertThat(vectors.ids(VectorStore.SEMANTIC_LAYER, "demo_sales")).isEmpty();
+
+        assertThat(ingest.deleteDatabase("demo_sales")).contains("demo_sales");
+        assertThat(semantic.termById(termId)).isEmpty();
+        assertThat(semantic.attributeById(nameAttr)).isEmpty();
+        assertThat(ingest.deleteDatabase("demo_sales")).isEmpty();
+    }
+
+    /** A trigger during a run queues exactly one more run; it never starts a second timer chain. */
+    @Test
+    void triggerDuringARunDoesNotDuplicateTheSchedule() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger runs = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.CountDownLatch started = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        IngestService slow = new IngestService(null, null, null, null, null, null, null) {
+            @Override
+            public List<Result> runAll() {
+                runs.incrementAndGet();
+                started.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                return List.of();
+            }
+        };
+        IngestScheduler scheduler = new IngestScheduler(slow, java.time.Duration.ofHours(1), false);
+        scheduler.start();
+        try {
+            scheduler.trigger();
+            assertThat(started.await(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            scheduler.trigger();
+            scheduler.trigger();
+            release.countDown();
+            long deadline = System.currentTimeMillis() + 5000;
+            while (scheduler.completedRuns() < 2 && System.currentTimeMillis() < deadline) {
+                Thread.sleep(20);
+            }
+            Thread.sleep(300);
+            assertThat(runs.get()).isEqualTo(2);
+            assertThat(scheduler.completedRuns()).isEqualTo(2);
+        } finally {
+            scheduler.stop();
+        }
+    }
+
     @Test
     void textsFollowTheRetrievalContract() {
         assertThat(EmbeddingTexts.columnText("db", "s", "t", "c", "integer", "", List.of(1, 2)))
@@ -150,6 +222,12 @@ class IngestServiceTest {
         assertThat(QueryHistoryParser.parse("UPDATE t SET a = 1")).isNull();
         QueryHistoryParser.Parsed u = QueryHistoryParser.parse("SELECT a FROM t1 UNION SELECT b FROM t2");
         assertThat(u.unions()).hasSize(1);
+        // a writing CTE is DML in disguise: ignored like any other DML, and never an exception
+        assertThat(QueryHistoryParser.parse("WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d")).isNull();
+        QueryHistoryParser.Parsed cte = QueryHistoryParser.parse(
+                "WITH big AS (SELECT o.id FROM s.orders o WHERE o.amount > 10) SELECT c.name FROM s.customers c"
+                        + " JOIN big b ON b.id = c.id WHERE c.id IN (SELECT x.id FROM s.vip x)");
+        assertThat(cte.tables()).contains("s.orders", "s.customers", "s.vip");
     }
 
     @Test

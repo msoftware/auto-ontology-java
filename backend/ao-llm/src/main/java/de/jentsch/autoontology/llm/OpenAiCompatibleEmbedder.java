@@ -105,6 +105,12 @@ public class OpenAiCompatibleEmbedder implements Embedder, EmbeddingModel {
         }
         Map<String, Object> resp = http.post().uri("/embeddings").contentType(MediaType.APPLICATION_JSON).body(body)
                 .retrieve().body(Map.class);
+        if (resp == null || !(resp.get("data") instanceof List<?> rows) || rows.size() != chunk.size()) {
+            // a short answer would silently shift every following vector onto the wrong text
+            throw new IllegalStateException("Embedding endpoint returned "
+                    + (resp != null && resp.get("data") instanceof List<?> l ? l.size() + " vectors" : "no data")
+                    + " for " + chunk.size() + " texts");
+        }
         List<Map<String, Object>> data = new ArrayList<>((List<Map<String, Object>>) resp.get("data"));
         data.sort(Comparator.comparingInt(d -> ((Number) d.getOrDefault("index", 0)).intValue()));
         List<float[]> out = new ArrayList<>();

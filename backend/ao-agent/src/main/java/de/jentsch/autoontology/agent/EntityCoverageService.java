@@ -41,9 +41,10 @@ public class EntityCoverageService {
         try {
             double threshold = maxDistance == null ? DEFAULT_MAX_DISTANCE : maxDistance;
             // domain rules: custom analyses plus acronyms (entity_coverage/main.py)
-            String domainRules = semantic.customAnalyses().stream().map(a -> "- " + a.get("name") + ": " + a.get("description"))
-                    .collect(Collectors.joining("\n")) + "\n" + app.acronyms().stream()
-                    .map(a -> "- " + a.get("name") + ": " + a.get("description")).collect(Collectors.joining("\n"));
+            java.util.function.Function<Map<String, Object>, String> line = a -> "- " + a.get("name")
+                    + (a.get("description") == null ? "" : ": " + a.get("description"));
+            String domainRules = semantic.customAnalyses().stream().map(line).collect(Collectors.joining("\n")) + "\n"
+                    + app.acronyms().stream().map(line).collect(Collectors.joining("\n"));
             String prompt = Prompts.render("entity_extraction", Map.of("question", question,
                     "max_entities", s.props().agent().sqlGenMaxEntities()))
                     + (domainRules.isBlank() ? "" : "\nDomain rules and glossary:\n" + domainRules.strip() + "\n");

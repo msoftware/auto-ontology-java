@@ -24,8 +24,8 @@ public class ApiExceptionHandler {
     @ExceptionHandler(ApiException.class)
     public ResponseEntity<Object> api(ApiException e) {
         return switch (e.style()) {
-            case DETAIL -> json(e.status(), Map.of("detail", e.detail()));
-            case ERROR -> json(e.status(), Map.of("error", e.detail()));
+            case DETAIL -> json(e.status(), body("detail", e.detail()));
+            case ERROR -> json(e.status(), body("error", e.detail()));
             case PLAIN -> ResponseEntity.status(e.status())
                     .contentType(MediaType.TEXT_PLAIN)
                     .body(String.valueOf(e.detail()));
@@ -51,6 +51,11 @@ public class ApiExceptionHandler {
     public ResponseEntity<Object> unreadable(Exception e) {
         return json(HttpStatus.UNPROCESSABLE_CONTENT, Map.of("detail", List.of(Map.of(
                 "loc", List.of("body"), "msg", String.valueOf(e.getMessage()), "type", "value_error"))));
+    }
+
+    /** A detail of {@code null} (exception without message) must not turn the error into a 500. */
+    private static Map<String, Object> body(String key, Object detail) {
+        return java.util.Collections.singletonMap(key, detail == null ? "" : detail);
     }
 
     private static ResponseEntity<Object> json(HttpStatus status, Object body) {

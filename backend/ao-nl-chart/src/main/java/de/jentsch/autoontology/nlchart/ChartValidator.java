@@ -124,11 +124,11 @@ public class ChartValidator {
         });
         if ("table".equals(vizType)) {
             boolean raw = "raw".equals(p.get("query_mode"));
-            if (raw && ((List<Object>) p.getOrDefault("all_columns", List.of())).isEmpty()) {
+            if (raw && QueryContextBuilder.list(p.get("all_columns")).isEmpty()) {
                 errors.add("Control all_columns is required in raw mode");
             }
-            if (!raw && ((List<Object>) p.getOrDefault("metrics", List.of())).isEmpty()
-                    && ((List<Object>) p.getOrDefault("groupby", List.of())).isEmpty()) {
+            if (!raw && QueryContextBuilder.list(p.get("metrics")).isEmpty()
+                    && QueryContextBuilder.list(p.get("groupby")).isEmpty()) {
                 errors.add("Controls metrics or groupby are required in aggregate mode");
             }
         }
@@ -162,8 +162,17 @@ public class ChartValidator {
         } catch (RuntimeException e) {
             errors.add("INVALID_TIME_RANGE_ERROR: time_range '" + timeRange + "' is invalid: " + e.getMessage());
         }
-        List<Object> filters = (List<Object>) p.get("adhoc_filters");
+        List<Object> filters = new ArrayList<>();
+        if (p.get("adhoc_filters") instanceof List<?> rawFilters) {
+            filters.addAll(rawFilters);
+        } else if (p.get("adhoc_filters") != null) {
+            errors.add("Control adhoc_filters must be a list of {col, op, val} objects");
+        }
         for (Object f : filters) {
+            if (!(f instanceof Map<?, ?>)) {
+                errors.add("Every entry of adhoc_filters must be an object {col, op, val}");
+                continue;
+            }
             Map<String, Object> filter = (Map<String, Object>) f;
             String op = String.valueOf(filter.get("op"));
             if (!OPERATORS.contains(op)) {

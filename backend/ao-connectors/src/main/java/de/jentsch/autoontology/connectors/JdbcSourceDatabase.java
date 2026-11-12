@@ -410,9 +410,22 @@ public abstract class JdbcSourceDatabase implements SourceDatabase {
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
+    /**
+     * Words that must be quoted when used as an identifier. Quoting an identifier that already has
+     * the folded case never changes its meaning, so the list errs on the side of quoting.
+     */
+    private static final Set<String> RESERVED = Set.of("ALL", "AND", "ANY", "AS", "ASC", "BETWEEN", "BY", "CASE",
+            "CHECK", "COLUMN", "COMMENT", "CONSTRAINT", "CREATE", "CROSS", "CURRENT_DATE", "CURRENT_TIME",
+            "CURRENT_TIMESTAMP", "CURRENT_USER", "DATE", "DAY", "DEFAULT", "DELETE", "DESC", "DISTINCT", "DROP", "ELSE",
+            "END", "EXCEPT", "EXISTS", "FALSE", "FETCH", "FOR", "FOREIGN", "FROM", "FULL", "GRANT", "GROUP", "HAVING",
+            "HOUR", "IN", "INDEX", "INNER", "INSERT", "INTERSECT", "INTERVAL", "INTO", "IS", "JOIN", "KEY", "LEFT",
+            "LEVEL", "LIKE", "LIMIT", "MINUTE", "MONTH", "NATURAL", "NOT", "NULL", "NUMBER", "OFFSET", "ON", "OR",
+            "ORDER", "OUTER", "PRIMARY", "RANK", "REFERENCES", "RIGHT", "ROW", "ROWNUM", "ROWS", "SECOND", "SELECT",
+            "SESSION_USER", "SET", "SIZE", "SOME", "TABLE", "THEN", "TIME", "TIMESTAMP", "TO", "TOP", "TRUE", "UNION",
+            "UNIQUE", "UPDATE", "USER", "USING", "VALUE", "VALUES", "VIEW", "WHEN", "WHERE", "WINDOW", "WITH", "YEAR");
+
     protected boolean reserved(String identifier) {
-        return Set.of("USER", "ORDER", "GROUP", "TABLE", "SELECT", "FROM", "WHERE", "VALUE", "KEY", "YEAR", "MONTH",
-                "DAY", "DATE", "TIME", "RANK", "LIMIT").contains(identifier.toUpperCase(Locale.ROOT));
+        return RESERVED.contains(identifier.toUpperCase(Locale.ROOT));
     }
 
     @Override

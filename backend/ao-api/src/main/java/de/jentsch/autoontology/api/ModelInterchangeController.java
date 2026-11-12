@@ -106,16 +106,25 @@ public class ModelInterchangeController {
                                             + "." + c.get("name")).orElse(null));
                             return am;
                         }).toList());
-                        x.put("sql_attributes", semantic.sqlAttributesOfTerm(tid).stream().map(a -> Map.of(
-                                "id", a.get("id"), "name", a.get("name"), "description", String.valueOf(a.get("description")),
-                                "expression", a.get("expression"), "source", String.valueOf(a.get("source")),
-                                "certified", a.get("certified"))).toList());
+                        x.put("sql_attributes", semantic.sqlAttributesOfTerm(tid).stream().map(a -> {
+                            // LinkedHashMap: missing values are exported as YAML null, not as the text "null"
+                            Map<String, Object> sm = new LinkedHashMap<>();
+                            for (String k : List.of("id", "name", "description", "expression", "source", "certified")) {
+                                sm.put(k, a.get(k));
+                            }
+                            return sm;
+                        }).toList());
                         terms.add(x);
                     }
                 }
             }
-            dbs.add(Map.of("id", dbId, "name", d.get("name"), "dialect", String.valueOf(d.get("dialect")),
-                    "description", String.valueOf(d.getOrDefault("description", "")), "tables", tables));
+            Map<String, Object> dm = new LinkedHashMap<>();
+            dm.put("id", dbId);
+            dm.put("name", d.get("name"));
+            dm.put("dialect", d.get("dialect"));
+            dm.put("description", d.get("description"));
+            dm.put("tables", tables);
+            dbs.add(dm);
         }
         Map<String, Object> doc = new LinkedHashMap<>();
         doc.put("format", "auto_ontology");
@@ -139,13 +148,19 @@ public class ModelInterchangeController {
         } catch (RuntimeException e) {
             throw ApiException.unprocessable("The file is not valid YAML");
         }
+        if (doc == null) {
+            throw ApiException.unprocessable("The file is empty");
+        }
         if (doc.containsKey("semantic_model") || doc.containsKey("ossie")) {
             throw ApiException.unprocessable("The Ossie format is not supported in this version");
         }
         int terms = 0;
         int attributes = 0;
         int sqlAttributes = 0;
-        for (Map<String, Object> t : (List<Map<String, Object>>) doc.getOrDefault("terms", List.of())) {
+        for (Map<String, Object> t : list(doc.get("terms"))) {
+            if (AppController.str(t.get("name")) == null) {
+                throw ApiException.unprocessable("Every term needs a name");
+            }
             String name = String.valueOf(t.get("name"));
             Optional<Map<String, Object>> existing = semantic.termById(String.valueOf(t.get("id")))
                     .or(() -> semantic.termByName(name));
@@ -153,39 +168,49 @@ public class ModelInterchangeController {
             if (existing.isPresent()) {
                 termId = (String) existing.get().get("id");
                 if (replace) {
-                    semantic.patchTerm(termId, Map.of("description", String.valueOf(t.getOrDefault("description", "")),
+                    semantic.patchTerm(termId, Map.of("description", t.get("description") == null ? ""
+                                    : String.valueOf(t.get("description")),
                             "name_certified", Boolean.TRUE.equals(t.get("name_certified")),
                             "description_certified", Boolean.TRUE.equals(t.get("description_certified"))));
                 }
             } else {
-                termId = semantic.mergeTerm(name, (String) t.get("description"),
-                        (List<String>) t.getOrDefault("synonyms", List.of()), "semantic", time.now());
-                semantic.patchTerm(termId, Map.of("imported_id", String.valueOf(t.get("id"))));
+                termId = semantic.mergeTerm(name, AppController.text(t.get("description")),
+                        t.get("synonyms") instanceof List<?> syn ? syn.stream().map(String::valueOf).toList() : List.of(),
+                        "semantic", time.now());
+                if (t.get("id") != null) {
+                    semantic.patchTerm(termId, Map.of("imported_id", String.valueOf(t.get("id"))));
+                }
             }
             terms++;
-            for (String q : (List<String>) t.getOrDefault("tables", List.of())) {
-                findTable(q).ifPresent(tb -> semantic.linkTableTerm((String) tb.get("id"), termId));
+            for (Object q : t.get("tables") instanceof List<?> l ? l : List.of()) {
+                findTable(AppController.text(q)).ifPresent(tb -> semantic.linkTableTerm((String) tb.get("id"), termId));
             }
-            for (Map<String, Object> a : (List<Map<String, Object>>) t.getOrDefault("column_attributes", List.of())) {
-                Optional<Map<String, Object>> col = findColumn((String) a.get("column"));
-                if (col.isPresent()) {
-                    semantic.mergeColumnAttribute(String.valueOf(a.get("name")), (String) a.get("description"),
+            for (Map<String, Object> a : list(t.get("column_attributes"))) {
+                Optional<Map<String, Object>> col = findColumn(AppController.text(a.get("column")));
+                if (col.isPresent() && AppController.str(a.get("name")) != null) {
+                    semantic.mergeColumnAttribute(String.valueOf(a.get("name")), AppController.text(a.get("description")),
                             (String) col.get().get("data_type"), (String) col.get().get("name"), name, termId,
                             (String) col.get().get("table_id"), (String) col.get().get("id"), time.now());
                     attributes++;
                 }
             }
-            for (Map<String, Object> a : (List<Map<String, Object>>) t.getOrDefault("sql_attributes", List.of())) {
-                Optional<Map<String, Object>> sa = semantic.sqlAttributeByName(String.valueOf(a.get("name")));
+            for (Map<String, Object> a : list(t.get("sql_attributes"))) {
+                String attrName = AppController.str(a.get("name"));
+                String expression = AppController.str(a.get("expression"));
+                if (attrName == null || expression == null) {
+                    // name and expression are NOT NULL in the store: an incomplete entry is skipped
+                    continue;
+                }
+                Optional<Map<String, Object>> sa = semantic.sqlAttributeByName(attrName);
                 if (sa.isPresent()) {
                     if (replace) {
-                        semantic.patchSqlAttribute((String) sa.get().get("id"), Map.of("expression", a.get("expression"),
-                                "description", String.valueOf(a.getOrDefault("description", ""))));
+                        semantic.patchSqlAttribute((String) sa.get().get("id"), Map.of("expression", expression,
+                                "description", a.get("description") == null ? "" : String.valueOf(a.get("description"))));
                     }
                 } else {
-                    String source = String.valueOf(a.getOrDefault("source", "manual"));
-                    semantic.insertSqlAttribute(String.valueOf(a.get("name")), (String) a.get("description"),
-                            String.valueOf(a.get("expression")), "null".equals(source) ? "manual" : source, termId, null,
+                    String source = AppController.text(a.get("source"));
+                    semantic.insertSqlAttribute(attrName, AppController.text(a.get("description")), expression,
+                            SemanticController.SQL_ATTRIBUTE_SOURCES.contains(source) ? source : "manual", termId, null,
                             user.id(), time.now());
                 }
                 sqlAttributes++;
@@ -194,6 +219,20 @@ public class ModelInterchangeController {
         }
         return Map.of("data", Map.of("terms", terms, "column_attributes", attributes, "sql_attributes", sqlAttributes,
                 "replace", replace));
+    }
+
+    /** The maps of a YAML list; anything else (missing key, scalar, list of scalars) yields no entries. */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> list(Object raw) {
+        List<Map<String, Object>> out = new ArrayList<>();
+        if (raw instanceof List<?> l) {
+            for (Object o : l) {
+                if (o instanceof Map<?, ?> m) {
+                    out.add((Map<String, Object>) m);
+                }
+            }
+        }
+        return out;
     }
 
     private Optional<Map<String, Object>> findTable(String qualified) {
@@ -213,6 +252,9 @@ public class ModelInterchangeController {
             return Optional.empty();
         }
         int dot = qualified.lastIndexOf('.');
+        if (dot < 0) {
+            return Optional.empty();
+        }
         return findTable(qualified.substring(0, dot)).flatMap(t -> catalog.columnsOfTable((String) t.get("id")).stream()
                 .filter(c -> qualified.substring(dot + 1).equals(c.get("name"))).findFirst());
     }

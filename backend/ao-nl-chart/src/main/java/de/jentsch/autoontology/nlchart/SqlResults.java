@@ -67,8 +67,13 @@ public final class SqlResults {
         if (n instanceof Integer || n instanceof Long || n instanceof Short) {
             return n;
         }
+        if ((n instanceof Double d && !Double.isFinite(d)) || (n instanceof Float f && !Float.isFinite(f))) {
+            // NaN and infinities have no JSON number; the renderer treats null as "no value"
+            return null;
+        }
         BigDecimal bd = new BigDecimal(n.toString()).round(new MathContext(15));
-        return bd.scale() <= 0 ? (Object) bd.longValue() : bd.doubleValue();
+        // integral and inside the long range; larger values stay floating point instead of overflowing
+        return bd.scale() <= 0 && bd.precision() - bd.scale() <= 18 ? (Object) bd.longValue() : bd.doubleValue();
     }
 
     static Object parseNumber(String s) {

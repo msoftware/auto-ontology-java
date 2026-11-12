@@ -142,6 +142,7 @@ public class SemanticCompiler {
         Semaphore permits = new Semaphore(Math.max(1, props.semantic().llmMaxInflight()));
         boolean probing = settings.distinctValueProbingEnabled();
         String domain = DomainContext.block(databaseName);
+        Set<String> piiColumns = pii.piiColumnIds();
         int done = 0;
         try (ExecutorService pool = Executors.newVirtualThreadPerTaskExecutor()) {
             List<Future<TableWork>> futures = new ArrayList<>();
@@ -153,7 +154,7 @@ public class SemanticCompiler {
                     }
                     permits.acquire();
                     try {
-                        return processTable(t, db, allFks, fkTargets, probing, domain);
+                        return processTable(t, db, allFks, fkTargets, probing, domain, piiColumns);
                     } finally {
                         permits.release();
                     }
@@ -182,7 +183,7 @@ public class SemanticCompiler {
     }
 
     private TableWork processTable(Map<String, Object> table, SourceDatabase db, List<Map<String, Object>> allFks,
-            Set<String> fkTargets, boolean probing, String domain) {
+            Set<String> fkTargets, boolean probing, String domain, Set<String> piiColumns) {
         String tableId = (String) table.get("id");
         List<Map<String, Object>> columns = catalog.columnsOfTable(tableId);
         Map<String, ColumnProfile> profiles = profiler.profile(db, (String) table.get("schema_name"),
@@ -203,12 +204,14 @@ public class SemanticCompiler {
         }
         Set<String> targetCols = columns.stream().map(c -> (String) c.get("name"))
                 .filter(n -> fkTargets.contains(tableId + "." + n)).collect(Collectors.toSet());
-        FkResult fk = taxonomy.suggestForeignKeys(table, columns, declared, profiles, targetCols);
+        // NFR-SEC-04: a table with PII columns sends no sample values to the LLM unless allowed
+        boolean samplesToLlm = props.security().piiSamplesToLlm()
+                || columns.stream().noneMatch(c -> piiColumns.contains((String) c.get("id")));
+        FkResult fk = taxonomy.suggestForeignKeys(table, columns, declared, profiles, targetCols, samplesToLlm);
         Set<String> fkColumns = declared.stream().map(f -> (String) f.get("source_column")).collect(Collectors.toSet());
         fk.suggestions().stream().map(PotentialFkSuggestion::column_name).forEach(fkColumns::add);
         // is_junction_table only when the LLM verdict and structural evidence (≥ 2 FK roles) agree
         boolean junction = fk.junction() && fkColumns.size() >= 2;
-        boolean samplesToLlm = props.security().piiSamplesToLlm() || columns.stream().noneMatch(c -> pii.isPii((String) c.get("id")));
         List<Spec> specs = taxonomy.attributeSpecs(columns, fkColumns, profiles, samplesToLlm);
         List<TermProposal> terms = taxonomy.extractTerms(table, specs, domain);
         return new TableWork(table, terms, specs, junction);
@@ -255,6 +258,7 @@ public class SemanticCompiler {
             declaredTarget.put((String) f.get("source_column_id"), (String) f.get("target_column_id"));
         }
         int created = 0;
+        Set<String> piiColumns = props.security().piiSamplesToLlm() ? Set.of() : pii.piiColumnIds();
         for (Map<String, Object> c : catalog.columnsOfDatabase(databaseId)) {
             String colId = (String) c.get("id");
             if (semantic.columnHasSemanticEdge(colId)) {
@@ -270,7 +274,7 @@ public class SemanticCompiler {
                 }
                 continue;
             }
-            String attrId = resolveViaVdb(databaseName, db, c);
+            String attrId = resolveViaVdb(databaseName, db, c, !piiColumns.contains(colId));
             if (attrId != null) {
                 semantic.addSemanticFk(colId, attrId);
                 created++;
@@ -281,7 +285,7 @@ public class SemanticCompiler {
         return created;
     }
 
-    private String resolveViaVdb(String databaseName, SourceDatabase db, Map<String, Object> col) {
+    private String resolveViaVdb(String databaseName, SourceDatabase db, Map<String, Object> col, boolean samplesToLlm) {
         String text = EmbeddingTexts.columnText(databaseName, (String) col.get("schema_name"), (String) col.get("table_name"),
                 (String) col.get("name"), (String) col.get("data_type"), (String) col.get("description"),
                 Json.readList((String) col.get("sample_values")));
@@ -302,7 +306,7 @@ public class SemanticCompiler {
         }
         String ctx = "Foreign-key column: " + col.get("name") + " (table: " + col.get("table_name") + ")\n"
                 + "Description: " + (col.get("description") == null ? "(none)" : col.get("description")) + "\n"
-                + "Sample values: " + samplesText(col.get("sample_values"));
+                + "Sample values: " + (samplesToLlm ? samplesText(col.get("sample_values")) : "(withheld)");
         String candidates = hits.stream().map(h -> "column_id=" + h.id() + " | " + truncate(h.record().text(), 300))
                 .collect(Collectors.joining("\n"));
         String human = ctx + "\n\nCandidate PK columns (from vector search):\n" + candidates + "\n\n"
@@ -323,8 +327,8 @@ public class SemanticCompiler {
             return null;
         }
         for (SearchHit h : hits) {
-            if (overlaps(db, (String) h.meta("schema_name"), (String) h.meta("table_name"),
-                    (String) h.meta("source_column"), samples)) {
+            if (Boolean.TRUE.equals(overlaps(db, (String) h.meta("schema_name"), (String) h.meta("table_name"),
+                    (String) h.meta("source_column"), samples))) {
                 return h.id();
             }
         }
@@ -341,8 +345,13 @@ public class SemanticCompiler {
         return s == null ? "" : s.length() > n ? s.substring(0, n) : s;
     }
 
-    /** Whether any of the sample values exists in the candidate column (bounded, read-only). */
-    private boolean overlaps(SourceDatabase db, String schema, String table, String column, List<String> samples) {
+    /**
+     * Whether any of the sample values exists in the candidate column (bounded, read-only).
+     *
+     * @return {@code null} when the probe itself failed (timeout, missing rights, a type that
+     *     cannot be cast): "unknown" is not "disjoint"
+     */
+    private Boolean overlaps(SourceDatabase db, String schema, String table, String column, List<String> samples) {
         if (table == null || column == null || samples.isEmpty()) {
             return false;
         }
@@ -353,8 +362,11 @@ public class SemanticCompiler {
                 + " WHERE " + cast + " IN (" + placeholders + ")", samples.size());
         try {
             return !db.execute(sql, new ArrayList<>(samples), 30, samples.size()).rows().isEmpty();
+        } catch (CancellationToken.CancelledException e) {
+            throw e;
         } catch (RuntimeException e) {
-            return false;
+            log.debug("Value probe on {}.{}.{} failed: {}", schema, table, column, e.getMessage());
+            return null;
         }
     }
 
@@ -372,8 +384,9 @@ public class SemanticCompiler {
             if (samples.isEmpty()) {
                 continue;
             }
-            if (!overlaps(db, (String) e.get("target_schema"), (String) e.get("target_table"),
-                    (String) e.get("target_column"), samples)) {
+            // only a probe that ran and found nothing proves the edge wrong; a failed probe keeps it
+            if (Boolean.FALSE.equals(overlaps(db, (String) e.get("target_schema"), (String) e.get("target_table"),
+                    (String) e.get("target_column"), samples))) {
                 semantic.deleteSemanticFk((String) e.get("source_column_id"), (String) e.get("attribute_id"));
                 removed++;
             }
@@ -484,8 +497,10 @@ public class SemanticCompiler {
         }
         int created = 0;
         Instant now = time.now();
-        for (SuggestedAttr a : s.suggestions()) {
-            if (a.name() == null || a.name().isBlank() || semantic.sqlAttributeByName(a.name().strip()).isPresent()) {
+        for (SuggestedAttr a : s.suggestions() == null ? List.<SuggestedAttr>of() : s.suggestions()) {
+            // sql_attribute.expression is NOT NULL: an incomplete suggestion is skipped, not a failed pass
+            if (a == null || a.name() == null || a.name().isBlank() || a.expression() == null || a.expression().isBlank()
+                    || semantic.sqlAttributeByName(a.name().strip()).isPresent()) {
                 continue;
             }
             String id = semantic.insertSqlAttribute(a.name().strip(), a.description(), a.expression(), "sql",
@@ -585,7 +600,8 @@ public class SemanticCompiler {
         BridgeSqlAttributeProposal p = llm.tryStructured(ModelRole.REASONING, List.of(
                 LlmMessage.system(Prompts.get("bridge_tables__system")), LlmMessage.user(user)),
                 BridgeSqlAttributeProposal.class).orElse(null);
-        if (p == null || p.name() == null || semantic.sqlAttributeByName(p.name().strip()).isPresent()) {
+        if (p == null || p.name() == null || p.name().isBlank() || p.expression() == null || p.expression().isBlank()
+                || semantic.sqlAttributeByName(p.name().strip()).isPresent()) {
             return 0;
         }
         String termId = targetTerm(p, tfks);

@@ -125,6 +125,10 @@ public class AgentRunner {
             sink.emit(AgentEvents.result(out));
             return out;
         } catch (AgentGraph.NodeException e) {
+            if (e.getCause() instanceof CancellationToken.CancelledException cancelled) {
+                // cancelled inside a node (e.g. during the SQL execution): same path as between nodes
+                throw cancelled;
+            }
             log.warn("Agent node {} failed: {}", e.node(), e.getMessage());
             sink.emit(AgentEvents.error(e.getMessage(), e.node(), e.getCause().getClass().getSimpleName(), null));
             return null;
@@ -164,10 +168,11 @@ public class AgentRunner {
         }
         // FR-AGT-06: acronyms and custom prompts per request
         List<Map<String, Object>> acronyms = app.acronyms();
+        // an acronym without description must not reach the prompt as the text "null"
         st.glossary = acronyms.stream().map(a -> Map.of("name", String.valueOf(a.get("name")),
-                "description", String.valueOf(a.getOrDefault("description", "")))).toList();
-        st.domainRules = acronyms.stream().map(a -> "- " + a.get("name") + ": " + a.get("description"))
-                .collect(Collectors.joining("\n"));
+                "description", a.get("description") == null ? "" : String.valueOf(a.get("description")))).toList();
+        st.domainRules = acronyms.stream().map(a -> "- " + a.get("name")
+                + (a.get("description") == null ? "" : ": " + a.get("description"))).collect(Collectors.joining("\n"));
         String customPrompts = app.prompts().stream().map(p -> String.valueOf(p.get("content")))
                 .collect(Collectors.joining("\n\n"));
         st.messages.add(LlmMessage.system(AgentPrompts.mainSystemPrompt(s.time().today(), customPrompts)
@@ -212,7 +217,8 @@ public class AgentRunner {
         String prompt = Prompts.render("follow_up_resolution", Map.of("question", question, "conversation_history", history));
         return s.llm().tryStructured(ModelRole.NON_REASONING, List.of(LlmMessage.user(prompt)),
                 FollowUpResolutionModel.class)
-                .map(r -> r.is_follow_up() ? r.standalone_question().strip() : question)
+                .map(r -> r.is_follow_up() && r.standalone_question() != null && !r.standalone_question().isBlank()
+                        ? r.standalone_question().strip() : question)
                 .orElse(question);
     }
 }

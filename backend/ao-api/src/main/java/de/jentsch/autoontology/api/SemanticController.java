@@ -10,6 +10,7 @@ import de.jentsch.autoontology.connectors.ReadOnlySql;
 import de.jentsch.autoontology.connectors.SourceDatabase;
 import de.jentsch.autoontology.ingestion.ConnectionService;
 import de.jentsch.autoontology.ingestion.DataLayerEmbedder;
+import de.jentsch.autoontology.llm.LlmException;
 import de.jentsch.autoontology.llm.LlmGateway;
 import de.jentsch.autoontology.llm.LlmMessage;
 import de.jentsch.autoontology.llm.ModelRole;
@@ -108,7 +109,7 @@ public class SemanticController {
     public Map<String, Object> terms(@RequestParam(required = false) String query,
             @RequestParam(defaultValue = "0") int skip, @RequestParam(defaultValue = "50") int limit) {
         Map<String, List<String>> tags = governance.tagNamesFor("term");
-        List<Map<String, Object>> terms = semantic.terms(query, skip, limit);
+        List<Map<String, Object>> terms = semantic.terms(query, Math.max(0, skip), Math.max(0, limit));
         List<Map<String, Object>> items = new ArrayList<>();
         List<Map<String, Object>> caCounts = new ArrayList<>();
         List<Map<String, Object>> saCounts = new ArrayList<>();
@@ -178,7 +179,7 @@ public class SemanticController {
         for (String t : otherTables) {
             for (Map<String, Object> term : semantic.termsOfTable(t)) {
                 out.putIfAbsent((String) term.get("id"), Map.of("id", term.get("id"), "name", term.get("name"),
-                        "description", String.valueOf(term.getOrDefault("description", ""))));
+                        "description", term.get("description") == null ? "" : String.valueOf(term.get("description"))));
             }
         }
         return new ArrayList<>(out.values());
@@ -195,6 +196,24 @@ public class SemanticController {
             }
         }
         Map<String, Object> values = new HashMap<>(body);
+        if (values.containsKey("name")) {
+            // term.name is NOT NULL and unique per source: answer with 422/409 instead of a database error
+            String name = AppController.str(values.get("name"));
+            if (name == null) {
+                throw ApiException.unprocessable("name must not be empty");
+            }
+            String source = String.valueOf(before.get("source"));
+            if (semantic.allTerms().stream().anyMatch(t -> !termId.equals(t.get("id")) && name.equals(t.get("name"))
+                    && source.equals(String.valueOf(t.get("source"))))) {
+                throw ApiException.conflict("A term with this name already exists");
+            }
+            values.put("name", name);
+        }
+        for (String flag : List.of("name_certified", "description_certified")) {
+            if (values.containsKey(flag) && !(values.get(flag) instanceof Boolean)) {
+                throw ApiException.unprocessable(flag + " must be a boolean");
+            }
+        }
         boolean textChange = values.containsKey("name") || values.containsKey("description");
         values.put("modified", Timestamp.from(time.now()));
         values.put("modified_by", user.id());
@@ -254,7 +273,8 @@ public class SemanticController {
         term(termId);
         Map<String, List<String>> tags = governance.tagNamesFor("column_attribute");
         List<Map<String, Object>> all = semantic.attributesOfTerm(termId);
-        List<Map<String, Object>> page = all.stream().skip(skip).limit(limit).map(a -> attributeView(a, tags)).toList();
+        List<Map<String, Object>> page = all.stream().skip(Math.max(0, skip)).limit(Math.max(0, limit))
+                .map(a -> attributeView(a, tags)).toList();
         return Map.of("data", page, "count", page.size(), "total", all.size());
     }
 
@@ -269,6 +289,12 @@ public class SemanticController {
             if (body.containsKey(k)) {
                 values.put(k, body.get(k));
             }
+        }
+        if (values.containsKey("name") && AppController.str(values.get("name")) == null) {
+            throw ApiException.unprocessable("name must not be empty");
+        }
+        if (values.containsKey("certified") && !(values.get("certified") instanceof Boolean)) {
+            throw ApiException.unprocessable("certified must be a boolean");
         }
         boolean samples = body.containsKey("sample_values");
         if (values.isEmpty() && !samples) {
@@ -347,6 +373,20 @@ public class SemanticController {
         return Map.of("data", out);
     }
 
+    /** The values of the check constraint {@code ck_sql_attribute_source}. */
+    static final List<String> SQL_ATTRIBUTE_SOURCES = List.of("manual", "sql", "table", "bridgeTable", "dataset");
+
+    /** 422 for an empty name, 409 when another SQL attribute already has it (the name is unique). */
+    private void checkSqlAttributeName(String id, Object rawName) {
+        String name = AppController.str(rawName);
+        if (name == null) {
+            throw ApiException.unprocessable("name must not be empty");
+        }
+        if (semantic.sqlAttributeByName(name).filter(other -> !id.equals(other.get("id"))).isPresent()) {
+            throw ApiException.conflict("A SQL attribute with this name already exists");
+        }
+    }
+
     static void parseExpression(String expr) {
         try {
             if (expr.strip().toUpperCase().startsWith("SELECT") || expr.strip().toUpperCase().startsWith("WITH")) {
@@ -378,6 +418,9 @@ public class SemanticController {
             throw ApiException.conflict("A SQL attribute with this name already exists");
         }
         String source = body.get("source") == null ? "manual" : String.valueOf(body.get("source"));
+        if (!SQL_ATTRIBUTE_SOURCES.contains(source)) {
+            throw ApiException.unprocessable("source must be one of " + SQL_ATTRIBUTE_SOURCES);
+        }
         String id = semantic.insertSqlAttribute(name, description, expression, source, termId,
                 AppController.str(body.get("owner_id")), user.id(), time.now());
         embedSqlAttribute(id);
@@ -399,6 +442,9 @@ public class SemanticController {
             if (body.get(k) != null) {
                 values.put(k, body.get(k));
             }
+        }
+        if (values.containsKey("name")) {
+            checkSqlAttributeName(id, values.get("name"));
         }
         values.put("description_suggestion", null);
         values.put("modified", Timestamp.from(time.now()));
@@ -423,6 +469,12 @@ public class SemanticController {
         }
         if (values.isEmpty()) {
             throw ApiException.unprocessable("Nothing to update");
+        }
+        if (values.containsKey("name")) {
+            checkSqlAttributeName(id, values.get("name"));
+        }
+        if (values.containsKey("certified") && !(values.get("certified") instanceof Boolean)) {
+            throw ApiException.unprocessable("certified must be a boolean");
         }
         values.put("modified", Timestamp.from(time.now()));
         values.put("modified_by", user.id());
@@ -451,10 +503,20 @@ public class SemanticController {
         Map<String, Object> a = sqlAttr(id);
         String cached = (String) a.get("description_suggestion");
         if (cached == null || cached.isBlank()) {
-            cached = llm.text(ModelRole.NON_REASONING, List.of(LlmMessage.user(
-                    "Write one or two sentences in business language describing what this SQL expression of the business"
-                            + " term '" + a.get("term_name") + "' calculates or filters. Return only the description.\n\n"
-                            + "Name: " + a.get("name") + "\nExpression: " + a.get("expression")))).strip();
+            String text;
+            try {
+                text = llm.text(ModelRole.NON_REASONING, List.of(LlmMessage.user(
+                        "Write one or two sentences in business language describing what this SQL expression of the"
+                                + " business term '" + a.get("term_name") + "' calculates or filters. Return only the"
+                                + " description.\n\nName: " + a.get("name") + "\nExpression: " + a.get("expression"))));
+            } catch (LlmException e) {
+                // the model endpoint is the failing party, not this server
+                throw ApiException.badGateway("The language model did not answer: " + e.getMessage());
+            }
+            if (text == null || text.isBlank()) {
+                throw ApiException.badGateway("The language model returned an empty description");
+            }
+            cached = text.strip();
             semantic.patchSqlAttribute(id, Map.of("description_suggestion", cached));
         }
         return Map.of("data", Map.of("description_suggestion", cached));
@@ -480,7 +542,7 @@ public class SemanticController {
             @RequestParam(defaultValue = "0") int skip, @RequestParam(defaultValue = "100") int limit) {
         List<Map<String, Object>> all = semantic.customAnalyses().stream().filter(a -> query == null
                 || String.valueOf(a.get("name")).toLowerCase().contains(query.toLowerCase())).toList();
-        List<Map<String, Object>> page = all.stream().skip(skip).limit(limit).toList();
+        List<Map<String, Object>> page = all.stream().skip(Math.max(0, skip)).limit(Math.max(0, limit)).toList();
         return Map.of("data", page, "count", page.size(), "total", all.size());
     }
 
@@ -551,6 +613,14 @@ public class SemanticController {
                 .orElseThrow(() -> ApiException.notFound("Custom analysis not found"));
         String name = AppController.str(body.getOrDefault("name", existing.get("name")));
         String sql = AppController.str(body.getOrDefault("sql", existing.get("sql")));
+        if (name == null || sql == null) {
+            throw ApiException.unprocessable("name and sql must not be empty");
+        }
+        // the same read-only rule as on create: an update must not smuggle in DML
+        String violation = ReadOnlySql.violation(sql);
+        if (violation != null) {
+            throw ApiException.unprocessable(violation);
+        }
         if (semantic.customAnalyses().stream().anyMatch(a -> !id.equals(a.get("id"))
                 && (String.valueOf(a.get("name")).equalsIgnoreCase(name) || String.valueOf(a.get("sql")).strip()
                         .equals(sql == null ? "" : sql.strip())))) {
@@ -595,6 +665,9 @@ public class SemanticController {
 
     @PutMapping("/pql-analyses/{id}")
     public Map<String, Object> updatePql(@PathVariable String id, @RequestBody Map<String, Object> body) {
+        if (AppController.str(body.get("name")) == null) {
+            throw ApiException.unprocessable("name is required");
+        }
         if (semantic.updatePql(id, AppController.str(body.get("name")), AppController.str(body.get("description")),
                 AppController.str(body.get("pql")), time.now()) == 0) {
             throw ApiException.notFound("PQL analysis not found");

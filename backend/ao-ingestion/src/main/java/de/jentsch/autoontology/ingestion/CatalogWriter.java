@@ -6,6 +6,7 @@ import de.jentsch.autoontology.ingestion.CatalogExtractor.Column;
 import de.jentsch.autoontology.ingestion.CatalogExtractor.ForeignKey;
 import de.jentsch.autoontology.ingestion.CatalogExtractor.Table;
 import de.jentsch.autoontology.store.CatalogRepository;
+import de.jentsch.autoontology.store.SemanticRepository;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -18,20 +19,29 @@ import org.springframework.transaction.support.TransactionTemplate;
 /**
  * Normalize and diff against the stored catalog (catalog/diff.py, catalog/write.py): new and
  * changed objects are upserted under stable IDs, removed ones deleted, FKs cleaned via
- * {@code last_seen}.
+ * {@code last_seen}. ColumnAttributes of removed tables and columns are deleted as well: they have
+ * no foreign key to their table and would otherwise stay behind as orphans.
  */
 public class CatalogWriter {
     private final CatalogRepository catalog;
+    private final SemanticRepository semantic;
     private final TransactionTemplate tx;
 
+    /** Without semantic repository: ColumnAttributes of removed objects are not cleaned up. */
     public CatalogWriter(CatalogRepository catalog, TransactionTemplate tx) {
+        this(catalog, null, tx);
+    }
+
+    public CatalogWriter(CatalogRepository catalog, SemanticRepository semantic, TransactionTemplate tx) {
         this.catalog = catalog;
+        this.semantic = semantic;
         this.tx = tx;
     }
 
-    /** Result of a write: ids by key and the diff counters. */
+    /** Result of a write: ids by key, the diff counters and the ids of everything that was removed. */
     public record WriteResult(String databaseId, Map<String, String> tableIds, Map<String, String> columnIds,
-            int added, int removed, List<String> removedTableIds, List<String> removedColumnIds) {}
+            int added, int removed, List<String> removedTableIds, List<String> removedColumnIds,
+            List<String> removedAttributeIds) {}
 
     public WriteResult write(Catalog cat, String dialect, Map<String, Object> connection, Instant now) {
         return tx.execute(status -> doWrite(cat, dialect, connection, now));
@@ -68,11 +78,23 @@ public class CatalogWriter {
         List<String> removedTables = new ArrayList<>();
         for (Map.Entry<String, String> e : existingTables.entrySet()) {
             if (!tableIds.containsKey(e.getKey())) {
-                catalog.deleteTable(e.getValue());
                 removedTables.add(e.getValue());
             }
         }
         List<String> removedColumns = new ArrayList<>();
+        for (Map.Entry<String, String> e : existingColumns.entrySet()) {
+            if (!columnIds.containsKey(e.getKey())) {
+                removedColumns.add(e.getValue());
+            }
+        }
+        // before the catalog rows go: the attribute ids are only reachable through them
+        List<String> removedAttributes = semantic == null ? List.of()
+                : semantic.attributeIdsOf(removedTables, removedColumns);
+        if (semantic != null) {
+            semantic.deleteAttributes(removedAttributes);
+        }
+        removedTables.forEach(catalog::deleteTable);
+        // columns of removed tables are already gone with their table (ON DELETE CASCADE)
         Set<String> removedTableSet = new HashSet<>(removedTables);
         for (Map.Entry<String, String> e : existingColumns.entrySet()) {
             if (!columnIds.containsKey(e.getKey())) {
@@ -80,7 +102,6 @@ public class CatalogWriter {
                 if (!removedTableSet.contains(existingTables.get(tableKey))) {
                     catalog.deleteColumn(e.getValue());
                 }
-                removedColumns.add(e.getValue());
             }
         }
         for (Map<String, Object> s : catalog.schemas(dbId)) {
@@ -97,6 +118,7 @@ public class CatalogWriter {
         }
         catalog.deleteStaleForeignKeys(dbId, now);
         catalog.markPulled(dbId, now);
-        return new WriteResult(dbId, tableIds, columnIds, added, removedTables.size(), removedTables, removedColumns);
+        return new WriteResult(dbId, tableIds, columnIds, added, removedTables.size(), removedTables, removedColumns,
+                removedAttributes);
     }
 }

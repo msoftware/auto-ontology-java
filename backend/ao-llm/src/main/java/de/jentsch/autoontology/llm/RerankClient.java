@@ -59,11 +59,18 @@ public class RerankClient {
         }
         Map<String, Object> resp = http.post().uri(url).contentType(MediaType.APPLICATION_JSON).body(body).retrieve()
                 .body(Map.class);
-        List<Map<String, Object>> rows = (List<Map<String, Object>>) resp.get(v1 ? "results" : "rankings");
+        Object rows = resp == null ? null : resp.get(v1 ? "results" : "rankings");
+        if (!(rows instanceof List<?> list)) {
+            throw new LlmException("Rerank endpoint " + url + " returned no " + (v1 ? "results" : "rankings"));
+        }
         List<Double> scores = new ArrayList<>(java.util.Collections.nCopies(documents.size(), Double.NEGATIVE_INFINITY));
-        for (Map<String, Object> r : rows) {
-            int idx = ((Number) r.get("index")).intValue();
-            scores.set(idx, ((Number) r.get(v1 ? "relevance_score" : "logit")).doubleValue());
+        for (Object o : list) {
+            Map<String, Object> r = (Map<String, Object>) o;
+            // documents the endpoint did not score keep -infinity; rows outside the request are ignored
+            if (r.get("index") instanceof Number idx && idx.intValue() >= 0 && idx.intValue() < scores.size()
+                    && r.get(v1 ? "relevance_score" : "logit") instanceof Number score) {
+                scores.set(idx.intValue(), score.doubleValue());
+            }
         }
         return scores;
     }

@@ -311,6 +311,7 @@ public class GovernanceRepository {
                 UNION SELECT owner_id FROM catalog_schema WHERE owner_id IS NOT NULL
                 UNION SELECT owner_id FROM catalog_table WHERE owner_id IS NOT NULL
                 UNION SELECT owner_id FROM term WHERE owner_id IS NOT NULL
+                UNION SELECT owner_id FROM sql_attribute WHERE owner_id IS NOT NULL
                 """, Map.of(), String.class);
     }
 }

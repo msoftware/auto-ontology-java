@@ -249,7 +249,7 @@ public class ExplorationController {
                 continue;
             }
             Map<String, Object> chip = Map.of("id", z.get("id"), "name", z.get("name"),
-                    "color", String.valueOf(z.getOrDefault("color", "")), "enabled", z.get("enabled"));
+                    "color", z.get("color") == null ? "" : String.valueOf(z.get("color")), "enabled", z.get("enabled"));
             for (Map<String, Object> t : (List<Map<String, Object>>) z.get("targets")) {
                 List<Map<String, Object>> tables = t.get("table_id") != null
                         ? catalog.tableById((String) t.get("table_id")).map(List::of).orElse(List.of())

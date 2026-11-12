@@ -32,10 +32,11 @@ public class CommonAutoConfiguration {
 
     /**
      * Uses the bean {@code quasarDashboardClock} when the dashboard runs in the same host
-     * (NFR-QD-05); {@code ao.clock.fixed-now} wins when set.
+     * (NFR-QD-05); {@code ao.clock.fixed-now} wins when set. A host that defines its own
+     * {@link AoTime} bean replaces this one.
      */
     @Bean
-    @ConditionalOnMissingBean(name = "aoClock")
+    @ConditionalOnMissingBean
     public AoTime aoTime(AoProperties props, ObjectProvider<Clock> clocks) {
         if (props.clock().fixedNow() != null && !props.clock().fixedNow().isBlank()) {
             return new AoTime(AoClock.from(props.clock().fixedNow()));

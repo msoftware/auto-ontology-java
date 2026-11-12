@@ -16,7 +16,9 @@ import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.schema.Column;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.Statement;
+import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.Select;
+import net.sf.jsqlparser.statement.select.SelectItem;
 import net.sf.jsqlparser.util.TablesNamesFinder;
 import net.sf.jsqlparser.util.deparser.ExpressionDeParser;
 import net.sf.jsqlparser.util.deparser.SelectDeParser;
@@ -28,6 +30,15 @@ import net.sf.jsqlparser.util.deparser.StatementDeParser;
  * identifiers quoted on PostgreSQL. Also reports the used objects for the intent prompt.
  */
 public final class SqlStaticChecks {
+    /**
+     * Names JSqlParser reports as columns although the engine resolves them itself (Oracle
+     * {@code SYSDATE}, {@code ROWNUM}, ...). Without this list a correct statement would be
+     * rejected with "column does not exist" and sent into the repair loop.
+     */
+    static final Set<String> PSEUDO_COLUMNS = Set.of("sysdate", "systimestamp", "rownum", "rowid", "level", "user",
+            "current_user", "session_user", "current_date", "current_time", "current_timestamp", "localtime",
+            "localtimestamp", "today", "now", "true", "false", "null");
+
     private SqlStaticChecks() {}
 
     /** Catalog view of the candidate database: table key → column names. */
@@ -57,7 +68,7 @@ public final class SqlStaticChecks {
         try {
             st = CCJSqlParserUtil.parse(ReadOnlySql.stripTrailingSemicolons(sql));
         } catch (Exception e) {
-            errors.add("SQL could not be parsed: " + e.getMessage().lines().findFirst().orElse(""));
+            errors.add("SQL could not be parsed: " + String.valueOf(e.getMessage()).lines().findFirst().orElse(""));
             return new Result(errors, usedTables, usedColumns);
         }
         Set<String> cteNames = new java.util.HashSet<>();
@@ -99,7 +110,21 @@ public final class SqlStaticChecks {
                 return super.visit(eq, context);
             }
         };
+        Set<String> declaredAliases = new java.util.HashSet<>();
         SelectDeParser select = new SelectDeParser(expr, new StringBuilder()) {
+            @Override
+            public <S> StringBuilder visit(PlainSelect plainSelect, S context) {
+                // result aliases, also those written without AS (COUNT(*) n ... ORDER BY n)
+                if (plainSelect.getSelectItems() != null) {
+                    for (SelectItem<?> item : plainSelect.getSelectItems()) {
+                        if (item.getAlias() != null && item.getAlias().getName() != null) {
+                            declaredAliases.add(unquote(item.getAlias().getName()).toLowerCase(Locale.ROOT));
+                        }
+                    }
+                }
+                return super.visit(plainSelect, context);
+            }
+
             @Override
             public <S> StringBuilder visit(Table table, S context) {
                 String key = resolveTable(catalog, table.getSchemaName() == null ? null : unquote(table.getSchemaName()),
@@ -126,6 +151,7 @@ public final class SqlStaticChecks {
             errors.add("Degenerate predicate " + d + " makes the query return no rows.");
         }
         Set<String> selectAliases = selectAliases(sql);
+        selectAliases.addAll(declaredAliases);
         for (Column c : columns) {
             String name = unquote(c.getColumnName());
             String owner = c.getTable() == null || c.getTable().getName() == null ? null : unquote(c.getTable().getName());
@@ -156,7 +182,7 @@ public final class SqlStaticChecks {
                     }
                 }
                 if (!found && !aliasToKey.isEmpty() && !selectAliases.contains(name.toLowerCase(Locale.ROOT))
-                        && !name.equalsIgnoreCase("true") && !name.equalsIgnoreCase("false")
+                        && !PSEUDO_COLUMNS.contains(name.toLowerCase(Locale.ROOT))
                         && cteNames.isEmpty() && knownAliases.isEmpty()) {
                     errors.add("Column " + name + " does not exist in any referenced table.");
                 }

@@ -44,8 +44,10 @@ public class SearchService {
     public static Request request(Map<String, Object> body) {
         @SuppressWarnings("unchecked")
         Map<String, Object> f = body.get("filters") instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
-        return new Request(String.valueOf(body.getOrDefault("search_term", "")),
-                String.valueOf(body.getOrDefault("text_match_option", "contains")),
+        // an explicit JSON null must not become the search text "null"
+        Object term = body.get("search_term");
+        Object option = body.get("text_match_option");
+        return new Request(term == null ? "" : String.valueOf(term), option == null ? "contains" : String.valueOf(option),
                 strings(f.get("objects")), strings(f.get("tags")), strings(f.get("data")),
                 Boolean.TRUE.equals(f.get("description")), !Boolean.FALSE.equals(f.get("synonyms")));
     }
@@ -129,14 +131,24 @@ public class SearchService {
             List<Map<String, Object>> terms = db.list("SELECT x.id, x.name, x.description, x.synonyms,"
                     + " x.name_certified, x.description_certified, NULL AS parent_id FROM term x WHERE (" + nameOrDesc
                     + synonymClause + ")", p);
+            String needle = term.toLowerCase(Locale.ROOT);
+            List<Map<String, Object>> matched = new ArrayList<>();
             for (Map<String, Object> t : terms) {
                 List<String> syn = Json.readStringList((String) t.remove("synonyms"));
-                t.put("synonyms", r.synonyms() ? syn.stream()
-                        .filter(s -> s.toLowerCase(Locale.ROOT).contains(term.toLowerCase(Locale.ROOT))).toList() : List.of());
+                List<String> hitSynonyms = r.synonyms() ? syn.stream()
+                        .filter(s -> s.toLowerCase(Locale.ROOT).contains(needle)).toList() : List.of();
+                t.put("synonyms", hitSynonyms);
                 t.put("certified", Boolean.TRUE.equals(t.remove("name_certified"))
                         && Boolean.TRUE.equals(t.remove("description_certified")));
+                // the SQL filter matched the JSON text of the synonyms, i.e. also brackets and quotes
+                boolean nameOrDescription = String.valueOf(t.get("name")).toLowerCase(Locale.ROOT).contains(needle)
+                        || (r.description() && t.get("description") != null
+                                && String.valueOf(t.get("description")).toLowerCase(Locale.ROOT).contains(needle));
+                if (nameOrDescription || !hitSynonyms.isEmpty()) {
+                    matched.add(t);
+                }
             }
-            add(hits, "Term", terms);
+            add(hits, "Term", matched);
         }
         if (types.contains("ColumnAttribute")) {
             add(hits, "ColumnAttribute", db.list("SELECT x.id, x.name, x.description, x.certified,"

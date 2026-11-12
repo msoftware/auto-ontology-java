@@ -34,8 +34,9 @@ public class IngestionAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public CatalogWriter aoCatalogWriter(CatalogRepository catalog, PlatformTransactionManager tm) {
-        return new CatalogWriter(catalog, new TransactionTemplate(tm));
+    public CatalogWriter aoCatalogWriter(CatalogRepository catalog, SemanticRepository semantic,
+            PlatformTransactionManager tm) {
+        return new CatalogWriter(catalog, semantic, new TransactionTemplate(tm));
     }
 
     @Bean
@@ -68,8 +69,9 @@ public class IngestionAutoConfiguration {
     @ConditionalOnMissingBean
     public IngestService aoIngestService(ConnectionService connections, CatalogWriter writer, CatalogRepository catalog,
             DataLayerEmbedder embedder, VectorStore vectors, RuntimeSettings settings, AoTime time, PiiDetection pii,
-            RuleService rules) {
-        IngestService ingest = new IngestService(connections, writer, catalog, embedder, vectors, settings, time);
+            RuleService rules, SemanticRepository semantic) {
+        IngestService ingest = new IngestService(connections, writer, catalog, semantic, embedder, vectors, settings,
+                time);
         ingest.addStage(pii);
         // FR-ING-01 step 8: with the compilation disabled, rules are replayed after the ingest
         ingest.addStage(new IngestService.Stage() {

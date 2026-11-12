@@ -206,6 +206,16 @@ public class PiiDetection implements IngestService.Stage {
         }
     }
 
+    /**
+     * Ids of all columns carrying the PII tag, in one query. Callers that check many columns
+     * (prompt building, compilation) use this instead of {@link #isPii(String)} per column.
+     */
+    public java.util.Set<String> piiColumnIds() {
+        return governance.tagByName(TAG).map(t -> java.util.Set.copyOf(db.column(
+                "SELECT column_id FROM tag_target WHERE tag_id = :t AND column_id IS NOT NULL",
+                Map.of("t", t.get("id")), String.class))).orElse(java.util.Set.of());
+    }
+
     /** Whether a column carries the PII tag (NFR-SEC-04: no samples to external LLMs). */
     public boolean isPii(String columnId) {
         return governance.tagByName(TAG).map(t -> governance.hasTag((String) t.get("id"), "column", columnId))

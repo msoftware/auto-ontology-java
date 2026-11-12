@@ -56,7 +56,7 @@ public class ConfigurationReport implements SmartInitializingSingleton {
         for (ModelRole role : ModelRole.values()) {
             ModelSettings s = ModelSettings.resolve(props.models(), role);
             l.add(String.format("%-17s = endpoint=%s, model=%s, api-key=%s, structured-output=%s",
-                    role.name().toLowerCase(), orDash(s.endpoint()), orDash(s.model()), maskKey(s.apiKey()),
+                    role.name().toLowerCase(java.util.Locale.ROOT), orDash(s.endpoint()), orDash(s.model()), maskKey(s.apiKey()),
                     s.structuredOutput()));
         }
         l.add("llm               = timeout=" + props.llm().invokeTimeoutS() + "s, max-inflight="

@@ -102,6 +102,47 @@ class StoreSchemaTest {
         assertThat(catalog.tableById(tableId)).isEmpty();
     }
 
+    /** Terms are merged by name: the reset of one database must not delete what another one still uses. */
+    @ParameterizedTest
+    @MethodSource("stores")
+    void resetOfOneDatabaseKeepsSharedTerms(DataSource ds) throws Exception {
+        StoreJdbc db = migrate(ds);
+        CatalogRepository catalog = new CatalogRepository(db);
+        SemanticRepository semantic = new SemanticRepository(db);
+        Instant now = Instant.parse("2026-06-30T00:00:00Z");
+        String suffix = String.valueOf(System.nanoTime());
+        String[] tableIds = new String[2];
+        String[] dbIds = new String[2];
+        for (int i = 0; i < 2; i++) {
+            dbIds[i] = catalog.upsertDatabase("shared_" + i + "_" + suffix, "h2", null, now);
+            String schemaId = catalog.upsertSchema(dbIds[i], "SALES");
+            tableIds[i] = catalog.upsertTable(schemaId, "CUSTOMERS", "base table", List.of("ID"), null);
+        }
+        String ownTable = catalog.upsertTable(catalog.upsertSchema(dbIds[0], "SALES"), "INVOICES", "base table",
+                List.of("ID"), null);
+        String shared = semantic.mergeTerm("Customer " + suffix, "A customer", List.of(), "semantic", now);
+        String own = semantic.mergeTerm("Invoice " + suffix, "An invoice", List.of(), "semantic", now);
+        semantic.linkTableTerm(tableIds[0], shared);
+        semantic.linkTableTerm(tableIds[1], shared);
+        semantic.linkTableTerm(ownTable, own);
+        String attr0 = semantic.mergeColumnAttribute("Id", "", "INTEGER", "ID", "Customer", shared, tableIds[0],
+                catalog.upsertColumn(tableIds[0], "ID", "INTEGER", false, 1, null), now);
+        String attr1 = semantic.mergeColumnAttribute("Id", "", "INTEGER", "ID", "Customer", shared, tableIds[1],
+                catalog.upsertColumn(tableIds[1], "ID", "INTEGER", false, 1, null), now);
+        catalog.markJunction(ownTable);
+
+        assertThat(semantic.deleteSemanticLayer(dbIds[0])).containsExactly(own);
+
+        assertThat(semantic.termById(own)).isEmpty();
+        assertThat(semantic.termById(shared)).isPresent();
+        assertThat(semantic.tablesOfTerm(shared)).extracting(t -> t.get("id")).containsExactly(tableIds[1]);
+        assertThat(semantic.attributeById(attr0)).isEmpty();
+        assertThat(semantic.attributeById(attr1)).isPresent();
+        assertThat(catalog.tablesWithoutTerm(dbIds[0])).hasSize(2);
+        assertThat(catalog.tableById(ownTable).orElseThrow().get("is_junction_table")).isEqualTo(Boolean.FALSE);
+        assertThat(semantic.attributeIdsOf(List.of(tableIds[1]), List.of())).containsExactly(attr1);
+    }
+
     @ParameterizedTest
     @MethodSource("stores")
     void appTablesAndSettings(DataSource ds) throws Exception {

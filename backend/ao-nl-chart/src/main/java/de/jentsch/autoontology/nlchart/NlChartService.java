@@ -37,6 +37,11 @@ import java.util.stream.Collectors;
 public class NlChartService {
     static final int MAX_REPAIR_ROUNDS = 2;
     static final double MAX_DATASET_DISTANCE = 0.75;
+    /**
+     * Marker result of mode A: the suggestion stayed invalid and the {@code error} event is
+     * already sent. Unlike {@code null} ("no dataset fits") it must not start mode B.
+     */
+    private static final Map<String, Object> FAILED = new java.util.HashMap<>();
 
     /** One alternative viz type with the reason. */
     public record Alternative(String viz_type, String reason) {}
@@ -108,6 +113,10 @@ public class NlChartService {
         step(sink, "choose_dataset", "Choosing dataset", "end", candidates.isEmpty() ? "No matching dataset"
                 : candidates.stream().map(Dataset::tableName).collect(Collectors.joining(", ")));
         Map<String, Object> result = candidates.isEmpty() ? null : modeA(req, candidates, sink);
+        if (result == FAILED) {
+            // reported as an error; running the SQL agent now would only add a second, unrelated answer
+            return;
+        }
         if (result == null) {
             result = modeB(req, sink);
         }
@@ -116,8 +125,8 @@ public class NlChartService {
             e.put("type", "chart_suggestion");
             e.putAll(result);
             sink.accept(e);
-            app.completeAnalytics(analyticsId, String.valueOf(result.get("explanation")), null,
-                    Json.write(result.get("params")), time.now());
+            app.completeAnalytics(analyticsId, result.get("explanation") == null ? null
+                    : String.valueOf(result.get("explanation")), null, Json.write(result.get("params")), time.now());
         }
     }
 
@@ -130,8 +139,10 @@ public class NlChartService {
         try {
             for (SearchHit h : vectors.search(VectorStore.SEMANTIC_LAYER, embedder.embedQuery(req.question()), 5,
                     new VectorStore.VectorFilter(List.of(), List.of("Dataset"), List.of()), MAX_DATASET_DISTANCE)) {
-                Object id = h.meta("dataset_id");
-                all.stream().filter(d -> String.valueOf(d.id()).equals(String.valueOf(id) .replace(".0", ""))).findFirst()
+                // the payload number comes back as Long (memory, Qdrant integer) or Double (JSON round trip)
+                Object raw = h.meta("dataset_id");
+                String id = raw instanceof Number num ? String.valueOf(num.longValue()) : String.valueOf(raw);
+                all.stream().filter(d -> String.valueOf(d.id()).equals(id)).findFirst()
                         .ifPresent(d -> {
                             if (!out.contains(d)) {
                                 out.add(d);
@@ -153,26 +164,30 @@ public class NlChartService {
         step(sink, "build_chart", "Building chart", "start", null);
         ChartSuggestion s = llm.tryStructured(ModelRole.REASONING, messages, ChartSuggestion.class).orElse(null);
         step(sink, "build_chart", "Building chart", "end", s == null ? "No suggestion" : s.explanation());
+        // one loop for the first answer and every repair round: the same checks, the same events
         for (int round = 0; s != null; round++) {
             if (s.dataset_id() == null || s.dataset_id().isBlank()) {
+                // the model says no single dataset answers the question: mode B
                 return null;
             }
-            Dataset d = candidates.stream().filter(x -> String.valueOf(x.id()).equals(s.dataset_id().strip())).findFirst()
-                    .orElse(null);
+            String datasetId = s.dataset_id().strip();
+            Dataset d = candidates.stream().filter(x -> String.valueOf(x.id()).equals(datasetId)).findFirst().orElse(null);
             List<String> errors = new ArrayList<>();
-            Map<String, Object> params = Map.of();
             ChartValidator.Result r = null;
             if (d == null) {
                 errors.add("dataset_id " + s.dataset_id() + " is not one of the candidates");
+            } else if (s.viz_type() == null || s.viz_type().isBlank()) {
+                errors.add("viz_type is required");
             } else {
+                Map<String, Object> params = null;
                 try {
                     params = Json.readMap(s.params_json());
                 } catch (RuntimeException e) {
                     errors.add("params_json is not a JSON object: " + e.getMessage());
                 }
-                if (errors.isEmpty()) {
+                if (params != null) {
                     step(sink, "validate", "Validating", "start", null);
-                    r = validator.validate(d, s.viz_type(), params, true);
+                    r = validator.validate(d, s.viz_type().strip(), params, true);
                     errors.addAll(r.errors());
                     step(sink, "validate", "Validating", "end", errors.isEmpty() ? "valid" : String.join("; ", errors));
                 }
@@ -186,8 +201,7 @@ public class NlChartService {
                 e.put("message", "The chart could not be validated: " + String.join("; ", errors));
                 e.put("node", "validate");
                 sink.accept(e);
-                return Map.of("mode", "semantic", "explanation", s.explanation() == null ? "" : s.explanation(),
-                        "warnings", errors, "params", params, "viz_type", String.valueOf(s.viz_type()), "invalid", true);
+                return FAILED;
             }
             // repair round with the error messages
             messages.add(LlmMessage.assistant(Json.write(s)));
@@ -195,52 +209,17 @@ public class NlChartService {
                     + "\nFix only what the errors require and answer again. If a time range cannot be expressed, use"
                     + " 'No filter' and add an assumption."));
             step(sink, "repair", "Repairing chart", "start", null);
-            ChartSuggestion next = llm.tryStructured(ModelRole.REASONING, messages, ChartSuggestion.class).orElse(null);
-            step(sink, "repair", "Repairing chart", "end", null);
-            if (next == null) {
-                return null;
-            }
-            return modeAAfterRepair(next, candidates, messages, sink, round + 1);
+            s = llm.tryStructured(ModelRole.REASONING, messages, ChartSuggestion.class).orElse(null);
+            step(sink, "repair", "Repairing chart", "end", s == null ? "No suggestion" : null);
         }
         return null;
-    }
-
-    private Map<String, Object> modeAAfterRepair(ChartSuggestion s, List<Dataset> candidates, List<LlmMessage> messages,
-            Consumer<Map<String, Object>> sink, int round) {
-        Dataset d = s.dataset_id() == null ? null : candidates.stream()
-                .filter(x -> String.valueOf(x.id()).equals(s.dataset_id().strip())).findFirst().orElse(null);
-        if (d == null) {
-            return null;
-        }
-        Map<String, Object> params;
-        try {
-            params = Json.readMap(s.params_json());
-        } catch (RuntimeException e) {
-            return null;
-        }
-        ChartValidator.Result r = validator.validate(d, s.viz_type(), params, true);
-        if (r.valid()) {
-            return answer("semantic", d, s, r);
-        }
-        if (round >= MAX_REPAIR_ROUNDS) {
-            Map<String, Object> e = new LinkedHashMap<>();
-            e.put("type", "error");
-            e.put("message", "The chart could not be validated: " + String.join("; ", r.errors()));
-            e.put("node", "validate");
-            sink.accept(e);
-            return null;
-        }
-        messages.add(LlmMessage.assistant(Json.write(s)));
-        messages.add(LlmMessage.user("Still invalid:\n- " + String.join("\n- ", r.errors()) + "\nFix it."));
-        ChartSuggestion next = llm.tryStructured(ModelRole.REASONING, messages, ChartSuggestion.class).orElse(null);
-        return next == null ? null : modeAAfterRepair(next, candidates, messages, sink, round + 1);
     }
 
     private Map<String, Object> answer(String mode, Dataset d, ChartSuggestion s, ChartValidator.Result r) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("mode", mode);
         out.put("dataset_id", d.id());
-        out.put("viz_type", s.viz_type());
+        out.put("viz_type", s.viz_type().strip());
         out.put("params", r.params());
         out.put("slice_name", s.slice_name() == null ? "" : s.slice_name().substring(0, Math.min(250, s.slice_name().length())));
         out.put("description", s.description());

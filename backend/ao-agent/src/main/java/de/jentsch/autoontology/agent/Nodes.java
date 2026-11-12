@@ -64,7 +64,8 @@ public class Nodes {
         String subtype;
         String rewritten = st.question();
         String extracted = "";
-        if (intent == null) {
+        if (intent == null || intent.question_type() == null) {
+            // no answer, or an answer without the classification: the safe default is a calculation
             type = Boolean.TRUE.equals(st.predictionOverride) ? "prediction" : "calculation";
             subtype = "prediction".equals(type) ? null : "match_based";
         } else {
@@ -178,7 +179,8 @@ public class Nodes {
             entities = List.of(question);
         } else {
             sanitized = m.sanitized_question() == null || m.sanitized_question().isBlank() ? question : m.sanitized_question();
-            entities = m.required_entity_name().stream().map(String::strip).filter(e -> !e.isEmpty()).distinct()
+            entities = (m.required_entity_name() == null ? List.<String>of() : m.required_entity_name()).stream()
+                    .filter(java.util.Objects::nonNull).map(String::strip).filter(e -> !e.isEmpty()).distinct()
                     .limit(s.props().agent().sqlGenMaxEntities()).toList();
             subject = m.subject();
             if (entities.isEmpty()) {
@@ -249,8 +251,13 @@ public class Nodes {
             CombinedCandidateFilterModel f = s.llm().tryStructured(ModelRole.NON_REASONING,
                     List.of(LlmMessage.user(prompt)), CombinedCandidateFilterModel.class).orElse(null);
             if (f != null) {
-                Set<String> keep = new java.util.HashSet<>(f.custom_analysis_ids());
-                keep.addAll(f.sql_attribute_ids());
+                Set<String> keep = new java.util.HashSet<>();
+                if (f.custom_analysis_ids() != null) {
+                    keep.addAll(f.custom_analysis_ids());
+                }
+                if (f.sql_attribute_ids() != null) {
+                    keep.addAll(f.sql_attribute_ids());
+                }
                 semantic = semantic.stream().filter(c -> !("CustomAnalysis".equals(c.label())
                         || "SqlAttribute".equals(c.label())) || keep.contains(c.id())).toList();
             }
@@ -461,10 +468,10 @@ public class Nodes {
         TableRelevanceModel r = s.llm().tryStructured(ModelRole.NON_REASONING, List.of(LlmMessage.user(prompt)),
                 TableRelevanceModel.class).orElse(null);
         List<String> keep = new ArrayList<>(joins.tableIds());
-        if (r != null) {
+        if (r != null && r.tables_to_remove() != null) {
             for (TableRemovalModel rm : r.tables_to_remove()) {
                 // candidates_preparation enforces both flags instead of trusting the prose
-                if (rm.supplies_no_needed_column() && rm.cannot_change_qualifying_rows()) {
+                if (rm != null && rm.supplies_no_needed_column() && rm.cannot_change_qualifying_rows()) {
                     String id = nameToId.get(String.valueOf(rm.table()).toLowerCase(Locale.ROOT));
                     if (id != null && keep.size() > 1) {
                         keep.remove(id);
@@ -550,6 +557,8 @@ public class Nodes {
 
     @SuppressWarnings("unchecked")
     String tablesText(List<Map<String, Object>> tables, String databaseName) {
+        // one lookup for the whole prompt instead of two store queries per column
+        Set<String> piiColumns = s.props().security().piiSamplesToLlm() ? Set.of() : s.pii().piiColumnIds();
         StringBuilder sb = new StringBuilder("AVAILABLE TABLES:\n");
         for (Map<String, Object> t : tables) {
             sb.append("\nTable: ").append(t.get("schema_name")).append('.').append(t.get("name"));
@@ -576,7 +585,7 @@ public class Nodes {
                 if (c.get("description") != null && !String.valueOf(c.get("description")).isBlank()) {
                     sb.append(" — ").append(c.get("description"));
                 }
-                String samples = sampleText(c);
+                String samples = sampleText(c, piiColumns);
                 if (!samples.isEmpty()) {
                     sb.append(" [samples: ").append(samples).append(']');
                 }
@@ -587,8 +596,8 @@ public class Nodes {
     }
 
     /** NFR-SEC-04: no samples of PII columns to external LLMs unless allowed. */
-    private String sampleText(Map<String, Object> c) {
-        if (!s.props().security().piiSamplesToLlm() && s.pii().isPii((String) c.get("id"))) {
+    private static String sampleText(Map<String, Object> c, Set<String> piiColumns) {
+        if (piiColumns.contains((String) c.get("id"))) {
             return "";
         }
         List<Object> samples = Json.readList((String) c.get("sample_values"));
@@ -691,10 +700,12 @@ public class Nodes {
                 .orElse(null);
         if (v != null && !v.is_valid()) {
             List<String> issues = new ArrayList<>();
-            issues.addAll(v.join_issues());
-            issues.addAll(v.aggregation_issues());
-            issues.addAll(v.evidence_issues());
-            issues.addAll(v.projection_issues());
+            for (List<String> part : java.util.Arrays.asList(v.join_issues(), v.aggregation_issues(), v.evidence_issues(),
+                    v.projection_issues())) {
+                if (part != null) {
+                    issues.addAll(part);
+                }
+            }
             // deterministic fallback: SQL that passed the static checks and was only rejected for intent
             st.put("last_intent_rejected_sql", sql);
             fail(st, "Intent validation failed: " + v.reasoning() + (issues.isEmpty() ? "" : "\n- "
@@ -716,8 +727,9 @@ public class Nodes {
     public void executeSql(AgentState st) {
         String sql = st.get("validated_sql");
         String dbName = st.get("target_database");
+        // never another database than the one the SQL was written for
         SourceDatabase connector = st.connectors.stream().filter(c -> c.databaseName().equals(dbName)).findFirst()
-                .orElse(st.connectors.isEmpty() ? null : st.connectors.get(0));
+                .orElse(dbName == null && st.connectors.size() == 1 ? st.connectors.get(0) : null);
         if (connector == null) {
             st.put("error", "No connector available for database " + dbName);
             return;
@@ -755,7 +767,7 @@ public class Nodes {
         String prompt = Prompts.render("empty_like_check", Map.of("question_block", st.question(), "sql_code", sql));
         EmptyLikeCheckModel m = s.llm().tryStructured(ModelRole.NON_REASONING, List.of(LlmMessage.user(prompt)),
                 EmptyLikeCheckModel.class).orElse(null);
-        if (m != null && !m.non_essential_like_predicates().isEmpty()) {
+        if (m != null && m.non_essential_like_predicates() != null && !m.non_essential_like_predicates().isEmpty()) {
             String error = "The query returned no rows. Remove these non-essential LIKE predicates and keep everything"
                     + " else: " + String.join("; ", m.non_essential_like_predicates());
             st.put("error", error);
@@ -868,7 +880,8 @@ public class Nodes {
                     "error_context", "SQL: " + sql + "\nError: " + error));
             ErrorAnalysis ea = s.llm().tryStructured(ModelRole.NON_REASONING, List.of(LlmMessage.user(analysis)),
                     ErrorAnalysis.class).orElse(null);
-            if (ea != null && ea.error_type() == ErrorType.MISSING_DATA && !ea.search_queries().isEmpty()) {
+            if (ea != null && ea.error_type() == ErrorType.MISSING_DATA && ea.search_queries() != null
+                    && !ea.search_queries().isEmpty()) {
                 addTables(st, ea.search_queries());
                 tables = (List<Map<String, Object>>) st.pathState.getOrDefault("relevant_tables", List.of());
                 st.recordThought("reconstruct_sql", "Missing data: " + ea.explanation());
@@ -957,7 +970,7 @@ public class Nodes {
     public void formatAndRespond(AgentState st) {
         SQLGenerationModel gen = st.get("sql_generation_result");
         List<Map<String, Object>> candidates = (List<Map<String, Object>>) st.pathState.getOrDefault("candidates", List.of());
-        String text = formatResponse(candidates, gen == null ? "" : gen.response());
+        String text = formatResponse(candidates, gen == null || gen.response() == null ? "" : gen.response());
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("response", text);
         response.put("sql_code", st.get("validated_sql"));

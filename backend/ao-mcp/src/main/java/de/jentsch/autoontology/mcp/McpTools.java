@@ -238,30 +238,33 @@ public class McpTools {
         String error = null;
         try {
             HttpResponse<java.util.stream.Stream<String>> r = http.send(req, HttpResponse.BodyHandlers.ofLines());
-            if (r.statusCode() >= 400) {
-                throw new IllegalStateException("Auto Ontology API returned " + r.statusCode());
-            }
-            for (String line : (Iterable<String>) r.body()::iterator) {
-                if (!line.startsWith("data:")) {
-                    continue;
+            // closing the stream releases the connection, also when the loop ends at [DONE] or with an error
+            try (java.util.stream.Stream<String> lines = r.body()) {
+                if (r.statusCode() >= 400) {
+                    throw new IllegalStateException("Auto Ontology API returned " + r.statusCode());
                 }
-                String payload = line.substring(5).strip();
-                if (payload.equals("[DONE]")) {
-                    break;
-                }
-                Map<String, Object> e = Json.readMap(payload);
-                switch (String.valueOf(e.get("type"))) {
-                    case "step" -> {
-                        if ("end".equals(e.get("phase"))) {
-                            steps.add(e.get("label") + (e.get("thought") == null ? "" : ": " + e.get("thought")));
-                        }
+                for (String line : (Iterable<String>) lines::iterator) {
+                    if (!line.startsWith("data:")) {
+                        continue;
                     }
-                    case "result" -> result = (Map<String, Object>) e.get("answer");
-                    case "error" -> error = String.valueOf(e.get("message"));
-                    default -> { }
+                    String payload = line.substring(5).strip();
+                    if (payload.equals("[DONE]")) {
+                        break;
+                    }
+                    Map<String, Object> e = Json.readMap(payload);
+                    switch (String.valueOf(e.get("type"))) {
+                        case "step" -> {
+                            if ("end".equals(e.get("phase"))) {
+                                steps.add(e.get("label") + (e.get("thought") == null ? "" : ": " + e.get("thought")));
+                            }
+                        }
+                        case "result" -> result = (Map<String, Object>) e.get("answer");
+                        case "error" -> error = String.valueOf(e.get("message"));
+                        default -> { }
+                    }
                 }
             }
-        } catch (java.io.IOException e) {
+        } catch (java.io.IOException | java.io.UncheckedIOException e) {
             throw new IllegalStateException("Auto Ontology backend is not reachable: " + e.getMessage(), e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

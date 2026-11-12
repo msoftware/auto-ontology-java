@@ -25,12 +25,26 @@ public final class Prompts {
         return fill(get(name), values);
     }
 
+    private static final java.util.regex.Pattern PLACEHOLDER = java.util.regex.Pattern.compile("\\{\\{([A-Za-z0-9_]+)}}");
+
+    /**
+     * Fills {@code {{name}}} placeholders in one pass. Inserted values are never scanned again, so
+     * a question or a sample value that happens to contain {@code {{tables}}} stays literal text.
+     * Placeholders without a value are left as they are.
+     */
     public static String fill(String template, Map<String, ?> values) {
-        String out = template;
-        for (Map.Entry<String, ?> e : values.entrySet()) {
-            out = out.replace("{{" + e.getKey() + "}}", e.getValue() == null ? "" : String.valueOf(e.getValue()));
+        java.util.regex.Matcher m = PLACEHOLDER.matcher(template);
+        StringBuilder out = new StringBuilder(template.length() + 256);
+        while (m.find()) {
+            String replacement = m.group();
+            if (values.containsKey(m.group(1))) {
+                Object v = values.get(m.group(1));
+                replacement = v == null ? "" : String.valueOf(v);
+            }
+            m.appendReplacement(out, java.util.regex.Matcher.quoteReplacement(replacement));
         }
-        return out;
+        m.appendTail(out);
+        return out.toString();
     }
 
     private static String load(String name) {

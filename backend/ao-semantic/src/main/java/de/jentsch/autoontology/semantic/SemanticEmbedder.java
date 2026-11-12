@@ -150,12 +150,16 @@ public class SemanticEmbedder {
         Map<String, List<Map<String, Object>>> byDb = new LinkedHashMap<>();
         for (Map<String, Object> t : semantic.tablesOfTerm(termId)) {
             String db = (String) t.get("database_name");
+            if (byDb.containsKey(db)) {
+                // a Term with several tables in one database: its attributes are already collected
+                continue;
+            }
+            List<Map<String, Object>> attrs = byDb.computeIfAbsent(db, k -> new ArrayList<>());
             for (Map<String, Object> a : semantic.attributesOfDatabase((String) t.get("database_id"))) {
                 if (termId.equals(a.get("term_id"))) {
-                    byDb.computeIfAbsent(db, k -> new ArrayList<>()).add(a);
+                    attrs.add(a);
                 }
             }
-            byDb.computeIfAbsent(db, k -> new ArrayList<>());
         }
         byDb.forEach((db, attrs) -> write(db, termRows(db, term, attrs, true)));
     }

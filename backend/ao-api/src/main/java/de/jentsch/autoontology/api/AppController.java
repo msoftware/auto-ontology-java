@@ -73,7 +73,11 @@ public class AppController {
     @PatchMapping("/conversations/{id}")
     public Map<String, Object> renameConversation(@PathVariable String id, @RequestBody Map<String, Object> body) {
         found(id);
-        app.renameConversation(id, String.valueOf(body.getOrDefault("title", "")), time.now());
+        String title = str(body.get("title"));
+        if (title == null) {
+            throw ApiException.error(HttpStatus.BAD_REQUEST, "title is required");
+        }
+        app.renameConversation(id, title, time.now());
         return app.conversation(id).orElseThrow();
     }
 
@@ -92,7 +96,7 @@ public class AppController {
             throw ApiException.error(HttpStatus.BAD_REQUEST, "role must be user or assistant");
         }
         Object sqlResponse = body.get("sql_response");
-        String mid = app.addMessage(id, role, (String) body.get("content"), (String) body.get("sql_code"),
+        String mid = app.addMessage(id, role, text(body.get("content")), text(body.get("sql_code")),
                 sqlResponse == null || sqlResponse instanceof String ? (String) sqlResponse : Json.write(sqlResponse),
                 time.now());
         app.touchConversation(id, time.now());
@@ -248,6 +252,8 @@ public class AppController {
     @GetMapping("/analytics")
     public Map<String, Object> analytics(@RequestParam(defaultValue = "0") int skip,
             @RequestParam(defaultValue = "100") int limit) {
+        skip = Math.max(0, skip);
+        limit = Math.max(0, limit);
         List<Map<String, Object>> all = app.analytics(Math.max(1, skip + limit));
         List<Map<String, Object>> page = all.stream().skip(skip).limit(limit).map(a -> {
             Map<String, Object> m = new LinkedHashMap<>(a);
@@ -260,5 +266,10 @@ public class AppController {
 
     static String str(Object o) {
         return o == null || String.valueOf(o).isBlank() ? null : String.valueOf(o);
+    }
+
+    /** Text of a JSON value; {@code null} stays {@code null} (a number or boolean becomes its text). */
+    static String text(Object o) {
+        return o == null ? null : String.valueOf(o);
     }
 }

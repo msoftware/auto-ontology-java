@@ -147,20 +147,38 @@ public class DatasetSync {
             } else {
                 String termId = (String) terms.get(0).get("id");
                 for (DatasetMetric m : d.metrics()) {
+                    if (m.expression() == null || m.expression().isBlank()) {
+                        dsWarnings.add("metric " + m.metricName() + " has no expression");
+                        continue;
+                    }
                     String name = m.verboseName() != null && !m.verboseName().isBlank() ? m.verboseName() : m.metricName();
-                    String desc = (m.description() == null || m.description().isBlank() ? name : m.description())
-                            + " (dataset " + d.tableName() + ", metric " + m.metricName() + ")";
+                    String marker = " (dataset " + d.tableName() + ", metric " + m.metricName() + ")";
+                    String desc = (m.description() == null || m.description().isBlank() ? name : m.description()) + marker;
                     Optional<Map<String, Object>> existing = semantic.sqlAttributeByName(name);
-                    if (existing.isPresent()) {
-                        if ("dataset".equals(existing.get().get("source")) && !Boolean.TRUE.equals(existing.get().get("certified"))) {
-                            semantic.patchSqlAttribute((String) existing.get().get("id"),
-                                    Map.of("expression", m.expression(), "description", desc));
-                        }
-                    } else {
-                        String id = semantic.insertSqlAttribute(name, desc, m.expression(), "dataset", termId, null,
+                    if (existing.isPresent() && !mirrorOf(existing.get(), marker, termId)) {
+                        // sql_attribute.name is unique in the whole store, and "count" exists in nearly every
+                        // dataset: without an own name the datasets would overwrite each other on every sync
+                        name = name + " (" + d.tableName() + ")";
+                        existing = semantic.sqlAttributeByName(name);
+                    }
+                    String attributeId = null;
+                    if (existing.isEmpty()) {
+                        attributeId = semantic.insertSqlAttribute(name, desc, m.expression(), "dataset", termId, null,
                                 user.id(), now);
-                        embedder.write(dbName, List.of(SemanticEmbedder.sqlAttributeRow(dbName,
-                                semantic.sqlAttributeById(id).orElseThrow())));
+                    } else if (mirrorOf(existing.get(), marker, termId) && !Boolean.TRUE.equals(existing.get().get("certified"))
+                            && !(m.expression().equals(existing.get().get("expression"))
+                                    && desc.equals(existing.get().get("description")))) {
+                        attributeId = (String) existing.get().get("id");
+                        semantic.patchSqlAttribute(attributeId, Map.of("expression", m.expression(), "description", desc));
+                    }
+                    if (attributeId != null) {
+                        // new or changed: the embedding follows; a failing endpoint must not stop the sync
+                        try {
+                            embedder.write(dbName, List.of(SemanticEmbedder.sqlAttributeRow(dbName,
+                                    semantic.sqlAttributeById(attributeId).orElseThrow())));
+                        } catch (RuntimeException e) {
+                            dsWarnings.add("metric " + m.metricName() + " is not embedded: " + e.getMessage());
+                        }
                     }
                     metrics++;
                 }
@@ -182,6 +200,12 @@ public class DatasetSync {
         lastStatus = status;
         log.info("Dataset sync: {} linked, {} metrics, {} warning(s)", linked, metrics, warnings.size());
         return status;
+    }
+
+    /** Whether a SqlAttribute is the mirror of this very dataset metric (and not a namesake). */
+    private static boolean mirrorOf(Map<String, Object> attribute, String marker, String termId) {
+        return "dataset".equals(attribute.get("source"))
+                && (String.valueOf(attribute.get("description")).endsWith(marker) || termId.equals(attribute.get("term_id")));
     }
 
     private Optional<Map<String, Object>> findTable(String dbName, Dataset d) {

@@ -28,6 +28,9 @@ public class IngestScheduler implements SmartLifecycle {
     private volatile ScheduledFuture<?> next;
     private volatile boolean running;
     private volatile int completedRuns;
+    /** Guarded by {@code this}: a run is executing / a trigger arrived while it was executing. */
+    private boolean inProgress;
+    private boolean rerunRequested;
 
     public IngestScheduler(IngestService ingest, Duration interval, boolean enabled) {
         this.ingest = ingest;
@@ -44,8 +47,16 @@ public class IngestScheduler implements SmartLifecycle {
         return completedRuns;
     }
 
-    /** Non-blocking manual trigger; resets the timer. */
+    /**
+     * Non-blocking manual trigger; resets the timer. While a run is executing the trigger is only
+     * noted and the next run starts right after it: scheduling a second task here would leave two
+     * timer chains behind, each rescheduling itself forever.
+     */
     public synchronized void trigger() {
+        if (inProgress) {
+            rerunRequested = true;
+            return;
+        }
         if (next != null) {
             next.cancel(false);
         }
@@ -53,6 +64,9 @@ public class IngestScheduler implements SmartLifecycle {
     }
 
     private void runOnce() {
+        synchronized (this) {
+            inProgress = true;
+        }
         try {
             ingest.runAll();
         } catch (RuntimeException e) {
@@ -67,8 +81,11 @@ public class IngestScheduler implements SmartLifecycle {
                 }
             });
             synchronized (this) {
+                inProgress = false;
+                long delay = rerunRequested ? 0 : interval.toMillis();
+                rerunRequested = false;
                 if (running) {
-                    next = executor.schedule(this::runOnce, interval.toMillis(), TimeUnit.MILLISECONDS);
+                    next = executor.schedule(this::runOnce, delay, TimeUnit.MILLISECONDS);
                 }
             }
         }

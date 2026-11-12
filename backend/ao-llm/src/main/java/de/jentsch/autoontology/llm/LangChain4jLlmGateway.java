@@ -102,7 +102,10 @@ public class LangChain4jLlmGateway implements LlmGateway {
                 last = e;
                 log.warn("Structured LLM call {} attempt {}/{} failed: {}", type.getSimpleName(), i + 1, maxRetries,
                         e.getMessage());
-                backoff(i);
+                if (i < maxRetries - 1) {
+                    // no pause after the last attempt: the caller is waiting for the failure
+                    backoff(i);
+                }
             }
         }
         throw new LlmException("Structured LLM call " + type.getSimpleName() + " failed", last);
@@ -160,7 +163,10 @@ public class LangChain4jLlmGateway implements LlmGateway {
             } catch (RuntimeException e) {
                 metrics.record(role, "text", System.nanoTime() - start, false);
                 last = e;
-                backoff(i);
+                log.warn("LLM text call attempt {}/{} failed: {}", i + 1, maxRetries, e.getMessage());
+                if (i < maxRetries - 1) {
+                    backoff(i);
+                }
             }
         }
         throw new LlmException("LLM text call failed", last);

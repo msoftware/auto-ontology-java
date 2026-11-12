@@ -115,11 +115,14 @@ public class CatalogController {
     @SuppressWarnings("unchecked")
     @PostMapping("/connections")
     public ResponseEntity<Map<String, Object>> create(@RequestBody Map<String, Object> body) {
-        Map<String, Object> c = (Map<String, Object>) body.get("connection");
-        if (c == null) {
+        if (!(body.get("connection") instanceof Map<?, ?> raw)) {
             throw ApiException.unprocessable("connection is required");
         }
+        Map<String, Object> c = (Map<String, Object>) raw;
         ConnectionSpec spec = connections.fromJson(null, c);
+        if (spec.name() == null || spec.name().isBlank()) {
+            throw ApiException.unprocessable("connection needs a url, host/database or datasource_bean");
+        }
         if (catalog.databaseByName(spec.name()).map(r -> r.get("connection") != null).orElse(false)) {
             throw ApiException.conflict("A connection for " + spec.name() + " already exists");
         }
@@ -146,7 +149,9 @@ public class CatalogController {
                 .filter(s -> s != null).map(Json::readMap)
                 .orElseThrow(() -> ApiException.notFound("Connection " + databaseName + " not found"));
         Map<String, Object> merged = new LinkedHashMap<>(existing);
-        merged.putAll((Map<String, Object>) body.getOrDefault("connection", Map.of()));
+        if (body.get("connection") instanceof Map<?, ?> changes) {
+            merged.putAll((Map<String, Object>) changes);
+        }
         merged.put("database_name", databaseName);
         ConnectionSpec spec = connections.fromJson(databaseName, merged);
         test(spec);
@@ -174,10 +179,10 @@ public class CatalogController {
     @SuppressWarnings("unchecked")
     @PostMapping("/connections/test")
     public Map<String, Object> testConnection(@RequestBody Map<String, Object> body) {
-        Map<String, Object> c = (Map<String, Object>) body.get("connection");
-        if (c == null) {
+        if (!(body.get("connection") instanceof Map<?, ?> raw)) {
             throw ApiException.unprocessable("connection is required");
         }
+        Map<String, Object> c = (Map<String, Object>) raw;
         String replacing = AppController.str(body.get("replacing"));
         Map<String, Object> merged = new LinkedHashMap<>(c);
         if (replacing != null && merged.get("password") == null) {
@@ -272,7 +277,7 @@ public class CatalogController {
         }
         Map<String, List<String>> tags = governance.tagNamesFor("column");
         List<Map<String, Object>> all = catalog.columnsOfTable(tableId);
-        List<Map<String, Object>> page = all.stream().skip(skip).limit(limit).map(c -> {
+        List<Map<String, Object>> page = all.stream().skip(Math.max(0, skip)).limit(Math.max(0, limit)).map(c -> {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("id", c.get("id"));
             m.put("column_name", c.get("name"));
@@ -382,10 +387,17 @@ public class CatalogController {
         return compilation.status();
     }
 
-    /** Destructive and asynchronous: 202 does not mean finished. */
+    /**
+     * Destructive and asynchronous: 202 does not mean finished. Without {@code database_name} every
+     * database is reset; an unknown name is a 404 and resets nothing.
+     */
     @PostMapping("/semantic-compilation/reset")
     public ResponseEntity<Map<String, Object>> reset(@RequestParam(name = "database_name", required = false) String dbName) {
-        Thread.ofVirtual().name("ao-semantic-reset").start(() -> compilation.reset(dbName));
+        String name = AppController.str(dbName);
+        if (name != null && catalog.databaseByName(name).isEmpty()) {
+            throw ApiException.notFound("Database " + name + " not found");
+        }
+        Thread.ofVirtual().name("ao-semantic-reset").start(() -> compilation.reset(name));
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of("status", "accepted"));
     }
 

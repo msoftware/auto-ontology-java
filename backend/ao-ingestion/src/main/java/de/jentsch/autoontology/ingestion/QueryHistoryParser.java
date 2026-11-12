@@ -113,7 +113,11 @@ public final class QueryHistoryParser {
             return;
         }
         if (ps.getWithItemsList() != null) {
-            ps.getWithItemsList().forEach(w -> visit(w.getSelect(), columns, joins, unions, nodes));
+            ps.getWithItemsList().forEach(w -> {
+                if (w.getParenthesedStatement() instanceof ParenthesedSelect cte) {
+                    visit(cte, columns, joins, unions, nodes);
+                }
+            });
         }
         Map<String, Table> aliases = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         List<Table> fromTables = new ArrayList<>();

@@ -41,6 +41,12 @@ public final class Rows {
         return v == null ? null : String.valueOf(v);
     }
 
+    /** Text of a value, {@code def} when it is missing or {@code null} (never the string "null"). */
+    public static String strOr(Map<String, ?> row, String key, String def) {
+        Object v = row.get(key);
+        return v == null ? def : String.valueOf(v);
+    }
+
     public static boolean bool(Map<String, ?> row, String key) {
         Object v = row.get(key);
         if (v instanceof Boolean b) {

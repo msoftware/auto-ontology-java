@@ -95,8 +95,13 @@ public class TableTaxonomy {
 
     // ------------------------------------------------------------------ FK suggestions
 
+    /**
+     * @param samplesToLlm false when the table has PII columns and {@code ao.security.pii-samples-to-llm}
+     *     is off: the prompt then carries no sample values (NFR-SEC-04)
+     */
     public FkResult suggestForeignKeys(Map<String, Object> table, List<Map<String, Object>> columns,
-            List<Map<String, Object>> declaredFks, Map<String, ColumnProfile> profiles, Set<String> fkTargetColumns) {
+            List<Map<String, Object>> declaredFks, Map<String, ColumnProfile> profiles, Set<String> fkTargetColumns,
+            boolean samplesToLlm) {
         @SuppressWarnings("unchecked")
         Set<String> pk = new HashSet<>((List<String>) table.getOrDefault("pk", List.of()));
         Set<String> knownFk = declaredFks.stream().map(f -> (String) f.get("source_column")).collect(Collectors.toSet());
@@ -109,10 +114,10 @@ public class TableTaxonomy {
         }
         String header = table.get("schema_name") == null ? (String) table.get("name")
                 : table.get("schema_name") + "." + table.get("name");
-        String allLines = columns.stream().map(c -> columnLine(c, profiles.get(c.get("name"))))
+        String allLines = columns.stream().map(c -> columnLine(c, profiles.get(c.get("name")), samplesToLlm))
                 .collect(Collectors.joining("\n"));
         String candLines = candidates.isEmpty() ? "  (none)" : candidates.stream()
-                .map(c -> columnLine(c, profiles.get(c.get("name")))).collect(Collectors.joining("\n"));
+                .map(c -> columnLine(c, profiles.get(c.get("name")), samplesToLlm)).collect(Collectors.joining("\n"));
         String fkLines = declaredFks.isEmpty() ? "  (none)" : declaredFks.stream()
                 .map(f -> "  - " + f.get("source_column") + " -> " + f.get("target_table")).collect(Collectors.joining("\n"));
         String prompt = "Table: " + header + "\n"
@@ -131,7 +136,11 @@ public class TableTaxonomy {
             return new FkResult(List.of(), false, "");
         }
         Set<String> llmPk = new HashSet<>();
-        for (String n : r.pk_column_names()) {
+        // lists and names of an LLM answer may be null even with a strict schema
+        for (String n : r.pk_column_names() == null ? List.<String>of() : r.pk_column_names()) {
+            if (n == null) {
+                continue;
+            }
             ColumnProfile p = profiles.get(n.strip());
             if (p == null || !Boolean.FALSE.equals(p.isUnique())) {
                 llmPk.add(n.strip());
@@ -140,7 +149,11 @@ public class TableTaxonomy {
         Set<String> allowed = candidates.stream().map(c -> (String) c.get("name")).collect(Collectors.toSet());
         List<PotentialFkSuggestion> filtered = new ArrayList<>();
         Set<String> seen = new HashSet<>();
-        for (PotentialFkSuggestion s : r.fk_suggestions()) {
+        for (PotentialFkSuggestion s : r.fk_suggestions() == null ? List.<PotentialFkSuggestion>of()
+                : r.fk_suggestions()) {
+            if (s == null || s.column_name() == null) {
+                continue;
+            }
             String n = s.column_name().strip();
             if (!n.isEmpty() && allowed.contains(n) && seen.add(n)) {
                 filtered.add(new PotentialFkSuggestion(n, nz(s.rationale()).strip()));
@@ -159,12 +172,12 @@ public class TableTaxonomy {
         return new FkResult(filtered, r.is_junction_table(), nz(r.junction_table_rationale()).strip());
     }
 
-    private static String columnLine(Map<String, Object> c, ColumnProfile p) {
+    private static String columnLine(Map<String, Object> c, ColumnProfile p, boolean samples) {
         StringBuilder suffix = new StringBuilder();
         if (c.get("description") != null && !String.valueOf(c.get("description")).isBlank()) {
             suffix.append(" — ").append(c.get("description"));
         }
-        if (p != null && !p.sampleValues().isEmpty()) {
+        if (samples && p != null && !p.sampleValues().isEmpty()) {
             List<String> vals = p.sampleValues().stream().map(String::valueOf).filter(v -> v.length() <= 30).toList();
             if (!vals.isEmpty()) {
                 suffix.append(" [samples: ").append(String.join(", ", vals)).append("]");
@@ -190,7 +203,7 @@ public class TableTaxonomy {
             String name = (String) c.get("name");
             String desc = (String) c.get("description");
             boolean has = desc != null && !desc.isBlank();
-            String text = has ? addSamples(desc, samplesFor(c, profiles, true)) : llmDescriptions.get(name);
+            String text = has ? addSamples(desc, samplesFor(c, profiles, samplesToLlm)) : llmDescriptions.get(name);
             specs.add(new Spec(name, columnToAttrName(name), nz(c.get("data_type")),
                     enrich(text, profiles.get(name), (String) c.get("format")), (String) c.get("id")));
         }
@@ -233,7 +246,10 @@ public class TableTaxonomy {
                 continue;
             }
             List<String> requested = batch.stream().map(c -> (String) c.get("name")).toList();
-            for (var d : r.descriptions()) {
+            for (var d : r.descriptions() == null ? List.<SemanticModels.ColumnDescription>of() : r.descriptions()) {
+                if (d == null) {
+                    continue;
+                }
                 String raw = nz(d.column_name());
                 String desc = nz(d.description()).strip();
                 if (desc.isEmpty()) {
@@ -284,7 +300,8 @@ public class TableTaxonomy {
         return llm.tryStructured(ModelRole.REASONING, List.of(
                 LlmMessage.system(Prompts.get("term_extractor__synonym_system")),
                 LlmMessage.user("Description: " + description)), SynonymExtraction.class)
-                .map(s -> s.synonyms().stream().map(String::strip).filter(x -> !x.isEmpty()).toList())
+                .map(s -> s.synonyms() == null ? List.<String>of() : s.synonyms().stream()
+                        .filter(java.util.Objects::nonNull).map(String::strip).filter(x -> !x.isEmpty()).toList())
                 .orElse(List.of());
     }
 
@@ -302,13 +319,19 @@ public class TableTaxonomy {
         List<TermProposal> terms = new ArrayList<>();
         Set<String> seenTerms = new HashSet<>();
         Set<String> assigned = new HashSet<>();
-        for (RawTermProposal t : raw.terms()) {
+        for (RawTermProposal t : raw.terms() == null ? List.<RawTermProposal>of() : raw.terms()) {
+            if (t == null) {
+                continue;
+            }
             String name = normalizeLabel(t.name(), defaultTerm);
             if (!seenTerms.add(name)) {
                 continue;
             }
             Map<String, String> attrs = new LinkedHashMap<>();
             for (TermColumnRef a : t.attributes() == null ? List.<TermColumnRef>of() : t.attributes()) {
+                if (a == null) {
+                    continue;
+                }
                 String col = nz(a.source_column()).strip();
                 if (col.isEmpty() || !byColumn.containsKey(col) || assigned.contains(col)) {
                     continue;

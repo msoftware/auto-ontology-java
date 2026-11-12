@@ -81,8 +81,8 @@ public class InternalController {
     public Map<String, Object> delete(@RequestHeader(name = "x-ao-internal-secret", required = false) String s,
             @RequestBody Map<String, Object> body) {
         guard(s);
-        String name = String.valueOf(body.get("database_name"));
-        return Map.of("deleted", ingest.deleteDatabase(name).orElse(null) != null);
+        Object name = body.get("database_name");
+        return Map.of("deleted", name != null && ingest.deleteDatabase(String.valueOf(name)).isPresent());
     }
 
     @PostMapping("/internal/semantic/compile")
@@ -124,12 +124,13 @@ public class InternalController {
         Map<String, Object> out = new LinkedHashMap<>();
         for (Map<String, Object> d : catalog.databases()) {
             String name = (String) d.get("name");
-            List<String> stored = vectors.ids(VectorStore.DATA_LAYER, name);
-            List<String> expected = embedder.rows((String) d.get("id"), name).stream()
-                    .map(DataLayerEmbedder.Row::id).toList();
+            // sets: a catalog easily has 100,000 columns, List.contains would be quadratic
+            java.util.Set<String> stored = new java.util.HashSet<>(vectors.ids(VectorStore.DATA_LAYER, name));
+            java.util.Set<String> expected = new java.util.HashSet<>();
+            embedder.rows((String) d.get("id"), name).forEach(r -> expected.add(r.id()));
             List<String> orphaned = stored.stream().filter(id -> !expected.contains(id)).toList();
             vectors.deleteByIds(VectorStore.DATA_LAYER, orphaned);
-            boolean missing = expected.stream().anyMatch(id -> !stored.contains(id));
+            boolean missing = !stored.containsAll(expected);
             if (missing) {
                 embedder.embedDatabase((String) d.get("id"), name);
             }

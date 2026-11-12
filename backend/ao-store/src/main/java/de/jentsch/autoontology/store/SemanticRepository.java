@@ -454,7 +454,9 @@ public class SemanticRepository {
 
     /**
      * Deletes the semantic layer of one database (or all when {@code databaseId} is null).
-     * PqlAnalysis survives a single-database reset (FR-SEM-08). Returns the deleted term ids.
+     * PqlAnalysis survives a single-database reset (FR-SEM-08). Terms are merged by
+     * {@code (name, source)}, so one Term can describe tables of several databases: such a Term
+     * only loses its links to this database and is kept. Returns the deleted term ids.
      */
     public List<String> deleteSemanticLayer(String databaseId) {
         if (databaseId == null) {
@@ -475,14 +477,44 @@ public class SemanticRepository {
         db.update("DELETE FROM column__semantic_fk WHERE column_id IN (SELECT c.id FROM catalog_column c WHERE"
                 + " c.table_id IN (" + tablesOfDb + "))", p);
         db.update("DELETE FROM column_attribute WHERE table_id IN (" + tablesOfDb + ")", p);
+        List<String> deleted = new ArrayList<>(termIds);
         if (!termIds.isEmpty()) {
-            Map<String, Object> tp = Map.of("ids", termIds);
+            deleted.removeAll(db.column("SELECT DISTINCT term_id FROM table__term WHERE term_id IN (:ids)"
+                    + " AND table_id NOT IN (" + tablesOfDb + ")", Map.of("ids", termIds, "db", databaseId), String.class));
+        }
+        db.update("DELETE FROM table__term WHERE table_id IN (" + tablesOfDb + ")", p);
+        if (!deleted.isEmpty()) {
+            Map<String, Object> tp = Map.of("ids", deleted);
             db.update("DELETE FROM sql_attribute WHERE id IN (SELECT attribute_id FROM sql_attribute__term"
                     + " WHERE term_id IN (:ids))", tp);
             db.update("DELETE FROM term WHERE id IN (:ids)", tp);
         }
         db.update("DELETE FROM custom_analysis WHERE database_id = :db", p);
-        return termIds;
+        db.update("UPDATE catalog_table SET is_junction_table = FALSE WHERE id IN (" + tablesOfDb + ")", p);
+        return deleted;
+    }
+
+    /**
+     * Ids of the ColumnAttributes that belong to the given tables or hang on the given columns
+     * (HAS_ATTRIBUTE). {@code column_attribute.table_id} has no foreign key, so these rows do not
+     * disappear with their table.
+     */
+    public List<String> attributeIdsOf(Collection<String> tableIds, Collection<String> columnIds) {
+        java.util.Set<String> ids = new java.util.LinkedHashSet<>();
+        if (!tableIds.isEmpty()) {
+            ids.addAll(db.column("SELECT id FROM column_attribute WHERE table_id IN (:ids)", Map.of("ids", tableIds),
+                    String.class));
+        }
+        if (!columnIds.isEmpty()) {
+            ids.addAll(db.column("SELECT attribute_id FROM column__has_attribute WHERE column_id IN (:ids)",
+                    Map.of("ids", columnIds), String.class));
+        }
+        return new ArrayList<>(ids);
+    }
+
+    /** Deletes ColumnAttributes with their edges (PROPERTY_OF, HAS_ATTRIBUTE, SEMANTIC_FK, tags). */
+    public int deleteAttributes(Collection<String> ids) {
+        return ids.isEmpty() ? 0 : db.update("DELETE FROM column_attribute WHERE id IN (:ids)", Map.of("ids", ids));
     }
 
     // ---------------------------------------------------------------- helpers

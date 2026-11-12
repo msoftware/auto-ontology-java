@@ -54,7 +54,7 @@ public class ChartAdvisor {
         if (r == null || !r.use_chart() || r.viz_type() == null || !ALLOWED.contains(r.viz_type())) {
             return Optional.empty();
         }
-        List<String> metrics = r.metrics().stream().filter(columns::contains).toList();
+        List<String> metrics = r.metrics() == null ? List.of() : r.metrics().stream().filter(columns::contains).toList();
         String x = r.x() != null && columns.contains(r.x()) ? r.x() : null;
         String series = r.series() != null && columns.contains(r.series()) ? r.series() : null;
         Map<String, Object> params = new LinkedHashMap<>();
@@ -73,7 +73,9 @@ public class ChartAdvisor {
                 if (metrics.size() < 2) {
                     return Optional.empty();
                 }
-                params.put("entity", x);
+                if (x != null) {
+                    params.put("entity", x);
+                }
                 params.put("x_metric", metrics.get(0));
                 params.put("y_metric", metrics.get(1));
             }

@@ -54,7 +54,7 @@ public final class QueryContextBuilder {
     static Map<String, Object> base(Map<String, Object> p, boolean timeGrain) {
         Map<String, Object> b = new LinkedHashMap<>();
         List<Map<String, Object>> filters = new ArrayList<>();
-        for (Object o : (List<Object>) p.getOrDefault("adhoc_filters", List.of())) {
+        for (Object o : list(p.get("adhoc_filters"))) {
             if (o instanceof Map<?, ?> f && f.get("col") != null && f.get("op") != null) {
                 Map<String, Object> copy = new LinkedHashMap<>((Map<String, Object>) f);
                 copy.remove("isExtra");

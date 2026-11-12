@@ -98,7 +98,8 @@ public final class Connectors {
                 }
             }
         }
-        String[] parts = u.split("[/:@]");
+        // "\\" too: Windows file paths of H2 (jdbc:h2:file:C:\data\sales)
+        String[] parts = u.split("[/:@\\\\]");
         String last = parts[parts.length - 1];
         return last.isBlank() ? "database" : last;
     }

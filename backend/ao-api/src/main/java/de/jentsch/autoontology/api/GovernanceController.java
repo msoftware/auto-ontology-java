@@ -68,7 +68,7 @@ public class GovernanceController {
             @RequestParam(defaultValue = "0") int skip, @RequestParam(defaultValue = "100") int limit) {
         List<Map<String, Object>> all = gov.tags().stream().filter(t -> query == null
                 || String.valueOf(t.get("name")).toLowerCase(Locale.ROOT).contains(query.toLowerCase(Locale.ROOT))).toList();
-        List<Map<String, Object>> page = all.stream().skip(skip).limit(limit).toList();
+        List<Map<String, Object>> page = all.stream().skip(Math.max(0, skip)).limit(Math.max(0, limit)).toList();
         return Map.of("data", page, "count", page.size(), "total", all.size());
     }
 
@@ -122,7 +122,8 @@ public class GovernanceController {
     public Map<String, Object> tagTargets(@PathVariable String id, @RequestParam(defaultValue = "0") int skip,
             @RequestParam(defaultValue = "50") int limit) {
         tag(id);
-        List<Map<String, Object>> page = gov.tagTargets(id, skip, limit).stream().map(this::targetView).toList();
+        List<Map<String, Object>> page = gov.tagTargets(id, Math.max(0, skip), Math.max(0, limit)).stream()
+                .map(this::targetView).toList();
         return Map.of("data", page, "count", page.size(), "total", gov.countTagTargets(id));
     }
 
@@ -183,7 +184,7 @@ public class GovernanceController {
             @RequestParam(defaultValue = "0") int skip, @RequestParam(defaultValue = "100") int limit) {
         List<Map<String, Object>> all = gov.rules().stream().filter(r -> query == null
                 || String.valueOf(r.get("name")).toLowerCase(Locale.ROOT).contains(query.toLowerCase(Locale.ROOT))).toList();
-        List<Map<String, Object>> page = all.stream().skip(skip).limit(limit).toList();
+        List<Map<String, Object>> page = all.stream().skip(Math.max(0, skip)).limit(Math.max(0, limit)).toList();
         return Map.of("data", page, "count", page.size(), "total", all.size());
     }
 
@@ -197,7 +198,7 @@ public class GovernanceController {
             throw ApiException.unprocessable("name and search_term are required");
         }
         List<String> tagIds = new ArrayList<>();
-        for (Object t : (List<Object>) body.getOrDefault("tags", List.of())) {
+        for (Object t : body.get("tags") instanceof List<?> l ? (List<Object>) l : List.of()) {
             String tid = t instanceof Map<?, ?> m ? String.valueOf(m.get("id")) : String.valueOf(t);
             tag(tid);
             tagIds.add(tid);
@@ -312,18 +313,28 @@ public class GovernanceController {
         };
     }
 
-    @SuppressWarnings("unchecked")
+    /**
+     * Zone targets from the request: {@code {type, id}} objects or bare ids. Every target must exist
+     * and have one of the three types; anything else is a 422 instead of a database error.
+     */
     private List<Map<String, String>> items(Object raw) {
         List<Map<String, String>> out = new ArrayList<>();
         for (Object o : raw instanceof List<?> l ? l : List.of()) {
-            if (o instanceof Map<?, ?> m) {
-                out.add(Map.of("type", String.valueOf(m.get("type")), "id", String.valueOf(m.get("id"))));
-            } else {
-                String id = String.valueOf(o);
-                String type = catalog.databaseById(id).isPresent() ? "database"
-                        : catalog.schemaById(id).isPresent() ? "schema" : "table";
-                out.add(Map.of("type", type, "id", id));
+            String id = String.valueOf(o instanceof Map<?, ?> m ? m.get("id") : o);
+            String type = o instanceof Map<?, ?> m && m.get("type") != null ? String.valueOf(m.get("type"))
+                    : catalog.databaseById(id).isPresent() ? "database"
+                    : catalog.schemaById(id).isPresent() ? "schema" : "table";
+            boolean exists = switch (type) {
+                case "database" -> catalog.databaseById(id).isPresent();
+                case "schema" -> catalog.schemaById(id).isPresent();
+                case "table" -> catalog.tableById(id).isPresent();
+                default -> throw ApiException.unprocessable("Unknown zone item type " + type
+                        + " (database, schema or table)");
+            };
+            if (!exists) {
+                throw ApiException.unprocessable("Zone item " + type + " " + id + " does not exist");
             }
+            out.add(Map.of("type", type, "id", id));
         }
         return out;
     }
@@ -353,8 +364,15 @@ public class GovernanceController {
         Map<String, Object> values = new HashMap<>();
         for (String k : List.of("name", "description", "color")) {
             if (body.containsKey(k)) {
-                values.put(k, body.get(k));
+                values.put(k, AppController.text(body.get(k)));
             }
+        }
+        if (values.containsKey("name")) {
+            String name = AppController.str(values.get("name"));
+            if (name == null) {
+                throw ApiException.unprocessable("name must not be empty");
+            }
+            values.put("name", name.strip());
         }
         if (body.containsKey("items") || values.containsKey("name")) {
             List<Map<String, String>> items = body.containsKey("items") ? items(body.get("items"))
@@ -449,7 +467,8 @@ public class GovernanceController {
         for (Map<String, Object> g : gov.groups()) {
             groupIds.add((String) g.get("id"));
             out.add(Map.of("id", g.get("id"), "name", g.get("name"), "kind", "group",
-                    "color", String.valueOf(g.getOrDefault("color", "")), "member_ids", List.of(), "permissions", List.of()));
+                    "color", g.get("color") == null ? "" : String.valueOf(g.get("color")), "member_ids", List.of(),
+                    "permissions", List.of()));
         }
         for (String o : gov.usedOwnerIds()) {
             if (!groupIds.contains(o)) {

@@ -11,6 +11,7 @@ import de.jentsch.autoontology.ingestion.QueryHistoryParser.ColumnRef;
 import de.jentsch.autoontology.ingestion.QueryHistoryParser.Parsed;
 import de.jentsch.autoontology.store.CatalogRepository;
 import de.jentsch.autoontology.store.RuntimeSettings;
+import de.jentsch.autoontology.store.SemanticRepository;
 import de.jentsch.autoontology.vector.VectorStore;
 import java.time.Instant;
 import java.util.HashMap;
@@ -45,6 +46,7 @@ public class IngestService {
     private final ConnectionService connections;
     private final CatalogWriter writer;
     private final CatalogRepository catalog;
+    private final SemanticRepository semantic;
     private final DataLayerEmbedder embedder;
     private final VectorStore vectors;
     private final RuntimeSettings settings;
@@ -53,11 +55,19 @@ public class IngestService {
     private final ReentrantLock lock = new ReentrantLock();
     private volatile Instant lastFinished;
 
+    /** Without semantic repository: deleting a database leaves its semantic layer in the store. */
     public IngestService(ConnectionService connections, CatalogWriter writer, CatalogRepository catalog,
             DataLayerEmbedder embedder, VectorStore vectors, RuntimeSettings settings, AoTime time) {
+        this(connections, writer, catalog, null, embedder, vectors, settings, time);
+    }
+
+    public IngestService(ConnectionService connections, CatalogWriter writer, CatalogRepository catalog,
+            SemanticRepository semantic, DataLayerEmbedder embedder, VectorStore vectors, RuntimeSettings settings,
+            AoTime time) {
         this.connections = connections;
         this.writer = writer;
         this.catalog = catalog;
+        this.semantic = semantic;
         this.embedder = embedder;
         this.vectors = vectors;
         this.settings = settings;
@@ -107,6 +117,7 @@ public class IngestService {
         if (!w.removedTableIds().isEmpty() || !w.removedColumnIds().isEmpty()) {
             vectors.deleteByIds(VectorStore.DATA_LAYER, w.removedTableIds());
             vectors.deleteByIds(VectorStore.DATA_LAYER, w.removedColumnIds());
+            vectors.deleteByIds(VectorStore.SEMANTIC_LAYER, w.removedAttributeIds());
         }
         int queries = writeQueryHistory(w, cat, now);
         for (Stage s : stages) {
@@ -140,7 +151,14 @@ public class IngestService {
         Map<String, Parsed> parsed = new LinkedHashMap<>();
         Map<String, Instant> last = new HashMap<>();
         for (Map<String, Object> q : cat.queries()) {
-            Parsed p = QueryHistoryParser.parse(String.valueOf(q.get("query_text")));
+            Parsed p;
+            try {
+                p = QueryHistoryParser.parse(String.valueOf(q.get("query_text")));
+            } catch (RuntimeException e) {
+                // one statement the parser cannot walk must not fail the ingest of the database
+                log.debug("Skipping history statement that could not be analysed: {}", e.toString());
+                continue;
+            }
             if (p == null) {
                 continue;
             }
@@ -208,22 +226,36 @@ public class IngestService {
         if (v == null) {
             return null;
         }
-        String s = String.valueOf(v);
+        String s = String.valueOf(v).strip().replace(' ', 'T');
         try {
-            return s.endsWith("Z") || s.contains("+") ? Instant.parse(s)
-                    : java.time.LocalDateTime.parse(s.replace(' ', 'T')).toInstant(java.time.ZoneOffset.UTC);
+            // with an offset ("Z", "+02:00", "-05:00"; seconds may be missing), otherwise local time read as UTC
+            return s.matches(".*T.*(Z|[+-]\\d{2}(:?\\d{2})?)$")
+                    ? java.time.OffsetDateTime.parse(s).toInstant()
+                    : java.time.LocalDateTime.parse(s).toInstant(java.time.ZoneOffset.UTC);
         } catch (RuntimeException e) {
             return null;
         }
     }
 
-    /** FR-ING-03: deleting a connection deletes its catalog and embeddings (dal/reset.py::delete_all_data). */
+    /**
+     * FR-ING-03: deleting a connection deletes its catalog, its semantic layer and the embeddings
+     * (dal/reset.py::delete_all_data). The semantic layer goes first: Terms and ColumnAttributes
+     * are only reachable through the catalog tables. Waits for a running ingest.
+     */
     public Optional<String> deleteDatabase(String name) {
         Optional<Map<String, Object>> db = catalog.databaseByName(name);
         if (db.isEmpty()) {
             return Optional.empty();
         }
-        catalog.deleteDatabase((String) db.get().get("id"));
+        lock.lock();
+        try {
+            if (semantic != null) {
+                semantic.deleteSemanticLayer((String) db.get().get("id"));
+            }
+            catalog.deleteDatabase((String) db.get().get("id"));
+        } finally {
+            lock.unlock();
+        }
         vectors.deleteByFilter(VectorStore.DATA_LAYER, name, null);
         vectors.deleteByFilter(VectorStore.SEMANTIC_LAYER, name, null);
         connections.refresh();
