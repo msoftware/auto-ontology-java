@@ -20,6 +20,23 @@ Ergänzt Abschnitt 22 des Anforderungsdokuments um die Abweichungen dieser Umset
 | Store-Liquibase | Hosts mit eigenem Liquibase | eigener Bean `aoLiquibase` mit eigenen Changelog-Tabellen; Boots `LiquibaseAutoConfiguration` tritt dadurch zurück | Koexistenz mit Host-Migrationen |
 | Offline-Demo (FR-DEMO-06) | `RecordedLlmGateway` mit Aufzeichnungen | `ScriptedLlmGateway` für Tests; Hash-Embedding ohne Netz; keine Aufzeichnung | – |
 
+## Präzisierungen gegenüber dem Vorbild
+
+Stellen, an denen die Umsetzung bewusst strenger oder genauer ist als eine wörtliche Übernahme.
+
+| Thema | Verhalten | Grund |
+|---|---|---|
+| Read-only-Prüfung (FR-CON-05) | rekursiv über CTEs, Mengenoperationen, Klammern und abgeleitete Tabellen; schreibende CTEs (`WITH … AS (DELETE … RETURNING)`) und `FOR UPDATE` auf jeder Ebene werden abgelehnt | JSqlParser meldet ein schreibendes CTE als gewöhnliches `Select`; der Typ des obersten Statements genügt als Schutz nicht |
+| Reset einer Datenbank (FR-SEM-08) | löscht nur Terms, die ausschließlich an Tabellen dieser Datenbank hängen; ein unbekannter `database_name` ist 404 und löscht nichts | Terms werden über (Name, Quelle) zusammengeführt und können mehrere Datenbanken beschreiben; ein Tippfehler darf nicht „alles zurücksetzen“ bedeuten |
+| Verbindung löschen (FR-ING-03) | entfernt zusätzlich zur Katalog-Kaskade die semantische Schicht der Datenbank | Terms, ColumnAttributes und SQL Attributes blieben sonst als Waisen im Store und in der Suche |
+| Entfernte Tabellen/Spalten (FR-ING-01) | ihre ColumnAttributes und deren Embeddings werden beim Ingest gelöscht | `column_attribute.table_id` hat keinen Fremdschlüssel |
+| Pruning semantischer FKs (FR-SEM-03) | eine Kante wird nur entfernt, wenn die Wertprobe lief und nichts fand; eine gescheiterte Probe lässt sie stehen | Timeout oder fehlendes Recht ist kein Beleg für disjunkte Werte |
+| Beispielwerte von PII-Spalten (NFR-SEC-04) | zurückgehalten in allen LLM-Prompts der Kompilierung (FK-Vorschläge, Beschreibungen, Semantic-FK-Auswahl) und des Agenten | vorher nur in einem Teil der Prompts |
+| Statische SQL-Prüfung (FR-AGT-04) | Pseudospalten der Engine (`SYSDATE`, `ROWNUM`, …) und Aliase ohne `AS` gelten nicht als unbekannte Spalten | sonst läuft korrektes SQL in die Reparaturschleife |
+| NL-Chart, Reparaturrunden (FR-NLC-11) | bleibt der Vorschlag nach 2 Runden ungültig, endet der Stream mit `error`; Modus B startet nur, wenn kein Dataset gewählt wurde | eine Fehlermeldung, gefolgt von einer zweiten Antwort des SQL-Agenten, ist widersprüchlich und teuer |
+| Dataset-Metriken (FR-NLC-02) | gleichnamige Metriken mehrerer Datasets werden als `<Name> (<Tabelle>)` gespiegelt | `sql_attribute.name` ist eindeutig; ohne eigenen Namen überschreiben sich die Metriken bei jedem Sync |
+| Scheduler (FR-ING-02, FR-SEM-07) | ein Trigger während eines Laufs führt zu genau einem Folgelauf | ein zweiter geplanter Task würde eine zweite, endlose Timer-Kette erzeugen |
+
 ## Offen
 
 - **FR-NLC-24:** Oracle- und SQL-Server-Dialekte in der Query-Engine von quasar-dashboard. Das gehört in das Repository quasar-dashboard und wurde dort nicht geändert. Modus A läuft deshalb nur auf Dashboard-Datasets in PostgreSQL und H2.

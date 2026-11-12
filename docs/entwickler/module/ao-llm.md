@@ -73,6 +73,7 @@ structured(role, messages, type)
          └─ tool_calling_no_choice wie oben, ohne tool_choice (Claude hinter Gateways)
          → StructuredParser.parse(raw, type)
      Fehler → Metrik, WARN-Log, Backoff 500 ms · 2^i (max. 8 s), nächster Versuch
+              (nach dem letzten Versuch ohne Pause: der Aufrufer wartet auf den Fehler)
  └─ scheitert NON_REASONING komplett und REASONING existiert → derselbe Ablauf mit REASONING
  └─ sonst LlmException
 ```
@@ -108,6 +109,9 @@ den Typ zu `["type", "null"]`.
   `ao.embedding.text-prefixed-models` wird stattdessen `query: ` bzw. `passage: ` vorangestellt.
 - Liefert der Endpunkt eine andere Dimension als `ao.vector.dimensions`, bricht der Aufruf mit
   einer Meldung ab, die den richtigen Wert nennt.
+- Liefert der Endpunkt **weniger Vektoren als Texte** (oder gar kein `data`), ist das ein Fehler
+  und wird wiederholt. Ohne diese Prüfung würden alle folgenden Vektoren stillschweigend auf den
+  falschen Text rutschen.
 - `HashEmbedder` zerlegt camelCase und snake_case in Wörter, stemmt einfache Plurale, gewichtet
   Wörter (2.0) stärker als Trigramme (0.5) und normalisiert. Ähnliche Formulierungen ergeben
   ähnliche Vektoren; semantische Synonyme erkennt er nicht.
@@ -122,12 +126,25 @@ den Typ zu `["type", "null"]`.
 | `…/rerank` | `{model, query, documents, top_n}` | `results[].relevance_score` |
 | `…/reranking`, `…/ranking` | `{model, query: {text}, passages: [{text}], truncate: END}` | `rankings[].logit` |
 
+Die Scores kommen in der Reihenfolge der Dokumente zurück. Bewertet der Endpunkt ein Dokument
+nicht, bleibt dessen Score `-∞`; Zeilen mit einem Index außerhalb der Anfrage werden ignoriert.
+Fehlt die Ergebnisliste ganz, wirft der Client eine `LlmException`.
+
 ### Prompts
 
 `Prompts.get("sql_user_prompt")` lädt `prompts/sql_user_prompt.txt` vom Classpath (gecacht).
 Zeilen, die am Dateianfang mit `#!` beginnen, sind Herkunftskommentare und werden entfernt; der
 abschließende Zeilenumbruch gehört nicht zum Prompt. `Prompts.render(name, values)` ersetzt
 `{{key}}` durch `String.valueOf(value)` (`null` → leer). Fehlende Platzhalter bleiben stehen.
+
+Das Füllen läuft in **einem Durchgang**: eingesetzte Werte werden nicht noch einmal nach
+Platzhaltern durchsucht. Steht in einer Benutzerfrage zufällig oder absichtlich `{{tables}}`,
+bleibt das wörtlicher Text und zieht nicht das Schema in die Frage hinein.
+
+```java
+Prompts.fill("Q: {{question}}\nT: {{tables}}", Map.of("question", "show {{tables}}", "tables", "SALES.ORDERS"));
+// → "Q: show {{tables}}\nT: SALES.ORDERS"
+```
 
 Die Prompt-Dateien selbst liegen in den Modulen, die sie verwenden (`ao-agent`, `ao-semantic`).
 
@@ -149,6 +166,86 @@ Vektorstore, Verbindungen (Passwörter maskiert), Agent- und NL-Chart-Einstellun
 - **Metriken:** `LlmMetrics.setListener(...)` mit einem Listener, der in eine Micrometer-Registry
   schreibt (derzeit nicht verdrahtet, siehe Fallstricke).
 
+## Code-Beispiele
+
+### Ein neuer strukturierter LLM-Aufruf
+
+```java
+/** Ergebnis-Record: Feldreihenfolge = Reihenfolge, in der das Modell die Felder füllt. */
+public record TableSummary(
+        @LlmField("One sentence describing what one row of the table represents.") String grain,
+        @LlmField("Up to 5 business questions this table can answer.") List<String> questions,
+        @LlmField(value = "The column holding the business date, or null when there is none.", nullable = true)
+                String date_column) implements LlmOutput {
+    @Override
+    public void validate() {                        // optional; IllegalArgumentException → neuer Versuch
+        if (grain == null || grain.isBlank()) {
+            throw new IllegalArgumentException("grain must not be empty");
+        }
+    }
+}
+```
+
+```java
+Optional<TableSummary> summary = llm.tryStructured(ModelRole.NON_REASONING, List.of(
+        LlmMessage.system("You describe database tables for business users."),
+        LlmMessage.user("Table: SALES.ORDERS\nColumns: ORDER_ID, CUSTOMER_ID, ORDER_DATE, AMOUNT")),
+        TableSummary.class);
+
+// Listen und Texte einer Antwort können trotz "required" null sein: immer absichern
+List<String> questions = summary.map(TableSummary::questions).orElse(null);
+if (questions == null) {
+    questions = List.of();                          // Fallback-Pfad statt NullPointerException
+}
+```
+
+Das Schema, das dabei an den Server geht:
+
+```java
+Json.write(OutputSchema.jsonSchema(TableSummary.class));
+// {"type":"object","properties":{"grain":{"type":"string","description":"One sentence …"},
+//   "questions":{"type":"array","items":{"type":"string"},"description":"Up to 5 …"},
+//   "date_column":{"type":["string","null"],"description":"The column …"}},
+//  "required":["grain","questions","date_column"],"additionalProperties":false}
+```
+
+`structured(...)` statt `tryStructured(...)` nur dort verwenden, wo es keinen sinnvollen Fallback
+gibt (im Agenten: `construct_sql_from_candidates` und `reconstruct_sql`); es wirft `LlmException`.
+
+### Freitext und HTTP-Fehler
+
+```java
+try {
+    String text = llm.text(ModelRole.NON_REASONING, "Summarize in one sentence: " + expression);
+} catch (LlmException e) {
+    throw ApiException.badGateway("The language model did not answer: " + e.getMessage());   // 502, nicht 500
+}
+```
+
+### Embeddings
+
+```java
+float[] query = embedder.embedQuery("revenue by region");                  // input_type = query
+List<float[]> passages = embedder.embedPassages(List.of("Term: Revenue.", "Term: Region."));  // input_type = passage
+// gleiche Reihenfolge wie die Eingabe; Länge jedes Vektors == ao.vector.dimensions
+```
+
+### Rollen und Modus je Rolle
+
+```yaml
+ao:
+  models:
+    defaults:      { endpoint: http://localhost:11434/v1, model: qwen3, structured-output: json_schema }
+    non-reasoning: { model: qwen3:8b }                       # erbt den Endpunkt der Defaults
+    reasoning:     { endpoint: https://gateway.intern/v1, model: claude-sonnet, api-key: ${GW_KEY},
+                     structured-output: tool_calling_no_choice }
+```
+
+```java
+ModelSettings s = ModelSettings.resolve(props.models(), ModelRole.NON_REASONING);
+// endpoint = http://localhost:11434/v1 (Default), model = qwen3:8b (Rolle), structuredOutput = json_schema
+```
+
 ### Tests mit `ScriptedLlmGateway`
 
 ```java
@@ -169,6 +266,8 @@ angefragten Typnamen.
   OpenAI-Stub; parametrisiert über alle vier Modi; unbekannte Felder und Validierungsfehler führen
   zu `LlmException`; prüft, dass Jackson-2-Databind nicht auf dem Classpath liegt.
 - `ConfigurationReportTest` – Maskierung von Keys und Passwörtern.
+- `PromptsTest` – Füllen der Platzhalter in einem Durchgang, `null` → leer, unbekannte Platzhalter
+  bleiben stehen.
 
 ## Fallstricke
 
@@ -178,8 +277,12 @@ angefragten Typnamen.
   Antwort oder Timeout. Abgebrochen wird nur das Warten auf einen Platz bzw. der Backoff (per
   Interrupt).
 - Die Retry-Schleife wiederholt **jeden** `RuntimeException`-Fehler, auch HTTP 4xx (z. B. falscher
-  Modellname). Bei Konfigurationsfehlern dauert es daher `max-retries` × Backoff, bis die
-  Exception kommt.
+  Modellname). Bei Konfigurationsfehlern dauert es daher `max-retries − 1` Pausen (0,5 s + 1 s bei
+  3 Versuchen), bis die Exception kommt.
+- **Antworten sind nie vertrauenswürdig geformt.** Auch mit striktem Schema kann ein Feld fehlen und
+  als `null` im Record ankommen (Jackson meldet fehlende Felder nicht). Wer über `list()` iteriert
+  oder `text().strip()` aufruft, ohne `null` zu prüfen, macht aus einer schwachen Modellantwort
+  einen abgebrochenen Lauf.
 - `json_schema` verlangt einen Server mit Unterstützung für `response_format.json_schema`
   (strict). Lokale Server ohne diese Unterstützung mit `json_object` betreiben.
 - Prompts werden prozessweit gecacht; Änderungen an Prompt-Dateien wirken erst nach Neustart.

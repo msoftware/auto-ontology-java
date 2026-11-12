@@ -110,14 +110,14 @@ sichert den Ausgangszustand, `restore()` stellt ihn für die Gesamtwiederholung 
 
 | Knoten | Rolle | Kern der Implementierung |
 |---|---|---|
-| `questionIntent` | NON_REASONING | `QuestionIntentModel`: Typ, Subtyp, umformulierte Frage, Inline-Evidenz, relevante SQL-Beispiele, Ziel-DB (Ähnlichkeit ≥ 0,8 gegen die Konnektornamen). Ohne LLM-Antwort: `calculation`/`match_based`. Widerspricht die erkannte Ziel-DB einem übergebenen `target_db`, wird ein Fehler geworfen |
+| `questionIntent` | NON_REASONING | `QuestionIntentModel`: Typ, Subtyp, umformulierte Frage, Inline-Evidenz, relevante SQL-Beispiele, Ziel-DB (Ähnlichkeit ≥ 0,8 gegen die Konnektornamen). Ohne LLM-Antwort oder ohne `question_type` in der Antwort: `calculation`/`match_based`. Widerspricht die erkannte Ziel-DB einem übergebenen `target_db`, wird ein Fehler geworfen |
 | `questionExtraction` | NON_REASONING | Entitäten (max. `ao.agent.sql-gen-max-entities`) und Subjekt mit Glossar/Akronymen |
 | `retrieveCandidates` | NON_REASONING | je Entität Suche in `semantic_layer` (Labels ColumnAttribute, SqlAttribute, CustomAnalysis, Term; k = 6, Distanz ≤ 0,75), Subjekt-Term (k = 3), ganze Frage + Evidenz für SqlAttributes/CustomAnalyses; zusätzlich Tabellen/Spalten aus `data_objects_layer` (ohne Schwelle, für eine noch leere Ontologie). Datenbank = höchste Entitätsabdeckung, dann beste Distanz. Ein LLM-Filter entfernt irrelevante SqlAttributes und CustomAnalyses in einem Aufruf |
 | `informationAgent` | REASONING | bis zu 6 Schritte `InformationAgentAction` mit den Tools `list_databases`, `list_tables`, `list_columns`, `list_terms`, `get_term`, `search_semantic_layer`; Beobachtungen auf 4000 Zeichen gekürzt |
 | `prepareCandidates` | NON_REASONING | relevante Tabellen (max. 12) laden, LLM-Relevanzfilter, Join-Pfade über `JoinPathFinder.connect`, relevante Queries und Custom Analyses, Samples und Nullability |
 | `constructSql` | REASONING | `SQLGenerationModel` (`thought`, `sql_code`, `response`) aus Systemprompt mit Dialekt- und Projektionsregeln, Kandidaten, Schema-Kontext, Join-Pfaden, Beispielen und Subtyp-Vorlage. Kein SQL → `unconstructable` |
 | `validateSql` | NON_REASONING | `SqlStaticChecks.check`, danach Intent-Validierung (`IntentValidationModel`) mit den verwendeten Spalten und autoritativen Join-Pfaden |
-| `executeSql` | – | Konnektor der Zieldatenbank, Timeout `sql_query_timeout_seconds`, Limit `ao.agent.max-result-rows` |
+| `executeSql` | – | Konnektor der Zieldatenbank, Timeout `sql_query_timeout_seconds`, Limit `ao.agent.max-result-rows`. Gibt es für die Zieldatenbank keinen Konnektor, ist das ein Fehler (`No connector available …`) – das SQL läuft nie gegen eine andere Datenbank |
 | `checkEmptyLikeResult` | NON_REASONING | nur einmal je Lauf: leeres Ergebnis und `LIKE` im SQL → `EmptyLikeCheckModel` nennt nicht-essenzielle Prädikate |
 | `checkValueRepair` | – | leeres Ergebnis: Literale von `=`, `<>`, `IN`, `LIKE` gegen Distinct-Werte der Spalte abgleichen (Groß/Klein, Near-Miss) und ersetzen → `repaired`; sonst einmal `regenerate` |
 | `reconstructSql` | NON_REASONING | erster Versuch: `ErrorAnalysis` (`FIXABLE`/`MISSING_DATA`), bei fehlenden Daten weitere Tabellen per Vektorsuche. Prompt mit Fehler, allen früheren Fehlversuchen und der Interpretationshistorie; Fortsetzung der SQL-Konversation |
@@ -125,8 +125,14 @@ sichert den Ausgangszustand, `restore()` stellt ihn für die Gesamtwiederholung 
 | `unconstructable` | – | kein LLM-Aufruf: Antwort aus `unconstructable_explanation` (vom SQL-Generator oder von `retryOr`), sonst ein Standardtext; setzt `unconstructable = true` |
 
 **Datenschutz:** `sampleText` gibt keine Beispielwerte von PII-Spalten an das LLM, solange
-`ao.security.pii-samples-to-llm=false`. `instructionLike` filtert Werte, die wie Anweisungen
-aussehen (Prompt-Injection über Daten).
+`ao.security.pii-samples-to-llm=false`. `tablesText` holt die PII-Spalten dafür **einmal** je Prompt
+(`PiiDetection.piiColumnIds()`), statt je Spalte den Store zu fragen. `instructionLike` filtert
+Werte, die wie Anweisungen aussehen (Prompt-Injection über Daten).
+
+**Robustheit gegen schwache Antworten:** Alle Knoten lesen LLM-Ergebnisse defensiv – fehlende
+Listen (`required_entity_name`, `custom_analysis_ids`, `tables_to_remove`, `join_issues`,
+`search_queries` …) gelten als leer, ein fehlender Antworttext als leerer Text. Eine unvollständige
+Antwort führt in den jeweiligen Fallback, nicht zu einem `error`-Event.
 
 ## `AgentRunner`
 
@@ -152,6 +158,10 @@ Map<String, Object> answer = runner.run(
    `standalone_question`, `sql_column_types`.
 6. `NodeException` → `error`-Event mit Knoten und Exception-Typ; `RecursionLimitException` →
    `error_type: GraphRecursionError`. Rückgabe `null`.
+7. **Abbruch:** `CancellationToken.CancelledException` wird immer an den Aufrufer weitergereicht –
+   egal ob das Token zwischen zwei Knoten geprüft wurde oder ein Knoten mitten in der
+   SQL-Ausführung abgebrochen wurde (dann steckt sie in der `NodeException` und wird ausgepackt).
+   Der Aufrufer sendet dafür ein einheitliches Event (`error_type: Cancelled` im Chat).
 
 Bei `null` hat der Aufrufer (Chat, NL-Charts) das `error`-Event schon erhalten.
 
@@ -159,12 +169,16 @@ Bei `null` hat der Aufrufer (Chat, NL-Charts) das `error`-Event schon erhalten.
 
 `check(sql, CatalogView)` liefert `Result(errors, tables, columns)`:
 
-1. `ReadOnlySql.violation` – nur ein `SELECT`/`WITH`.
+1. `ReadOnlySql.violation` – nur ein rein lesendes `SELECT`/`WITH` (auch schreibende CTEs und
+   `FOR UPDATE` in Unterabfragen werden abgelehnt, siehe [`ao-connectors`](ao-connectors.md)).
 2. Parsen mit JSqlParser.
 3. Jede referenzierte Tabelle existiert im Katalog der Datenbank (Schlüssel `schema.table`,
    case-insensitiv).
-4. Spaltenreferenzen über Aliase auflösen; unbekannte Spalten melden (Subquery-Aliase und
-   SELECT-Aliase ausgenommen).
+4. Spaltenreferenzen über Aliase auflösen; unbekannte Spalten melden. Ausgenommen sind
+   Subquery-Aliase, SELECT-Aliase (auch ohne `AS`: `COUNT(*) n … ORDER BY n`) und die
+   **Pseudospalten der Engine** (`PSEUDO_COLUMNS`: `SYSDATE`, `SYSTIMESTAMP`, `ROWNUM`, `ROWID`,
+   `LEVEL`, `USER`, `CURRENT_DATE` …). JSqlParser meldet diese Namen als Spalten; ohne die Ausnahme
+   würde korrektes Oracle-SQL mit „Column SYSDATE does not exist“ in die Reparaturschleife laufen.
 5. Degenerierte Prädikate wie `1=0`.
 6. PostgreSQL: Mixed-Case-Bezeichner müssen gequotet sein.
 
@@ -228,9 +242,139 @@ ob ein Chart besser ist als eine Tabelle, und liefert dann
 
 **Runner ersetzen:** eigene `AgentRunner`-Bean (z. B. mit zusätzlichen Knoten).
 
+## Code-Beispiele
+
+### Der Agent von außen
+
+```java
+List<Map<String, Object>> events = new ArrayList<>();
+Map<String, Object> answer = runner.run(
+        new AgentRunner.Request(
+                "Top 5 customers by revenue in 2025",
+                "Revenue means extended price minus discount.",   // evidence, optional
+                null,                                             // prediction: null = das LLM klassifiziert
+                "demo_sales",                                     // target_db: Name oder UUID, null = automatisch
+                List.of(Map.of("question", "How many customers?", "answer", "663", "sql", "SELECT COUNT(*) …")),
+                connections.answeringConnectors()),
+        events::add,                                              // step-, sql-, result-, error-Events
+        new CancellationToken());
+
+if (answer == null) {
+    // ein error-Event wurde bereits gesendet (Knotenfehler oder Rekursionslimit)
+} else {
+    answer.get("response");              // Antworttext mit [[[name/id]]]-Links
+    answer.get("sql_code");              // das ausgeführte SQL ("" bei Metadatenfragen)
+    answer.get("sql_response_from_db");  // List<Map<String, Object>> oder null
+    answer.get("thoughts");              // [{node, label, thought}, …]
+}
+```
+
+Die Events eines typischen Laufs:
+
+```json
+{"type":"step","node":"question_intent","label":"Classifying the question","phase":"start"}
+{"type":"step","node":"question_intent","label":"Classifying the question","phase":"end","thought":"Question type: calculation (ranking)"}
+{"type":"sql","node":"validate_sql_query","sql":"SELECT c.CUSTOMER_NAME, SUM(…) …"}
+{"type":"result","answer":{"response":"…","sql_code":"…","sql_columns":["CUSTOMER_NAME","REVENUE"],"sql_response_from_db":[…],"thoughts":[…],"question_type":"calculation","target_db":"demo_sales"}}
+```
+
+### Einen Knoten ergänzen
+
+Beispiel: nach der Ausführung prüfen, ob das Ergebnis abgeschnitten wurde, und das in der Antwort
+vermerken.
+
+```java
+// Nodes.java
+public void noteTruncation(AgentState st) {
+    Integer rows = st.get("row_count");                       // von execute_sql_query gesetzt
+    int max = s.props().agent().maxResultRows();
+    if (rows != null && rows >= max) {
+        st.put("truncation_note", "Only the first " + max + " rows are shown.");
+        st.recordThought("note_truncation", "Result capped at " + max + " rows");   // erscheint als Step-Gedanke
+    }
+}
+```
+
+```java
+// AgentRunner.buildGraph
+g.node("note_truncation", nodes::noteTruncation);
+// vorher: check_value_repair … default -> "format_and_respond"
+g.route("check_value_repair", st -> switch (String.valueOf(st.<Object>get("value_repair"))) {
+    case "repaired" -> "validate_sql_query";
+    case "regenerate" -> st.failedAttempts() < maxAttempts ? "reconstruct_sql" : "note_truncation";
+    default -> "note_truncation";
+});
+g.edge("note_truncation", "format_and_respond");
+```
+
+```java
+// NodeLabels.LABELS
+Map.entry("note_truncation", "Checking the result size")
+```
+
+Regeln für Knoten: nur über `st.get/put` kommunizieren; `st.put("error", …)` plus
+`st.addFailedAttempt(sql, error)` signalisiert einen Fehlversuch (das Routing entscheidet dann über
+`retryOr`); Exceptions nur werfen, wenn der Lauf wirklich enden soll (sie werden zum `error`-Event).
+
+### Ein Knoten mit LLM-Aufruf und Fallback
+
+```java
+public void classifyUrgency(AgentState st) {
+    String prompt = Prompts.render("urgency_check", Map.of("question", st.question()));
+    UrgencyModel m = s.llm().tryStructured(ModelRole.NON_REASONING, List.of(LlmMessage.user(prompt)),
+            UrgencyModel.class).orElse(null);
+    // m == null: LLM nicht erreichbar oder Antwort ungültig → Fallback, kein Abbruch
+    st.put("urgent", m != null && m.urgent());
+    st.recordThought("classify_urgency", m == null ? "No classification available" : m.reasoning());
+}
+```
+
+### Die statische Prüfung direkt verwenden
+
+```java
+SqlStaticChecks.CatalogView view = SqlStaticChecks.view(catalog.columnsOfDatabase(databaseId), "postgres");
+SqlStaticChecks.Result r = SqlStaticChecks.check(
+        "SELECT c.customer_name, SUM(o.amount) total FROM sales.orders o"
+                + " JOIN sales.customers c ON c.id = o.customer_id GROUP BY c.customer_name ORDER BY total DESC", view);
+r.valid();      // true
+r.tables();     // [sales.orders, sales.customers]
+r.columns();    // [sales.customers.customer_name, sales.orders.amount, sales.customers.id, sales.orders.customer_id]
+
+SqlStaticChecks.check("SELECT o.totl FROM sales.orders o", view).errors();
+// ["Column totl does not exist in table orders."]   ← genau dieser Text geht an reconstruct_sql
+```
+
+### Join-Pfade abfragen
+
+```java
+JoinPathFinder.Result joins = joinPathFinder.connect(databaseId, List.of(ordersId, citiesId));
+joins.hops();        // [SALES.ORDERS.CUSTOMER_ID = SALES.CUSTOMERS.CUSTOMER_ID, SALES.CUSTOMERS.CITY_ID = SALES.CITIES.CITY_ID]
+joins.tableIds();    // [orders, cities, customers]  – die Zwischentabelle CUSTOMERS gehört dazu
+joins.unreachable(); // Tabellen ohne Pfad
+joins.describe();    // der Block "SUGGESTED JOIN PATHS …" für den Prompt
+
+List<JoinPathFinder.Hop> path = joinPathFinder.bridge(databaseId, ordersId, citiesId);   // null = kein Pfad
+```
+
+### Beantwortbarkeit und Chart-Empfehlung
+
+```java
+Map<String, Object> c = coverage.coverage("revenue by supplier", "demo_sales", 0.75, true);
+c.get("coverage");            // 0.5 – Anteil der Entitäten mit Treffer
+c.get("uncovered_entities");  // ["supplier"]
+
+Optional<Map<String, Object>> chart = chartAdvisor.recommend(question, sql,
+        List.of("MONTH", "REVENUE"), List.of(java.sql.Types.DATE, java.sql.Types.DECIMAL), rows);
+// {viz_type=line, params={x_axis=MONTH, metrics=[REVENUE], row_limit=12, slice_name=…}, mode=sql}
+```
+
 ## Tests
 
-Kein Unit-Test im Modul. Der Agent wird Ende-zu-Ende in `DemoEndToEndTest` (`ao-app`) mit einem
+`SqlStaticChecksTest` prüft die statische Phase ohne LLM und ohne Store: verwendete Objekte,
+unbekannte Tabellen und Spalten, Pseudospalten (`SYSDATE`, `ROWNUM`), Aliase ohne `AS`, die
+Read-only-Regel inklusive schreibender CTEs, degenerierte Prädikate und das PostgreSQL-Quoting.
+
+Der Agent als Ganzes wird Ende-zu-Ende in `DemoEndToEndTest` (`ao-app`) mit einem
 `ScriptedLlmGateway` geprüft: Das erste SQL referenziert eine nicht existierende Tabelle
 (statische Prüfung schlägt fehl → `reconstruct_sql`), das zweite filtert auf `'wholesale'`
 (leeres Ergebnis → `check_value_repair` korrigiert auf `'Wholesale'`). Neue Knoten sollten eigene
@@ -250,7 +394,12 @@ bekommen.
   haben einen Fallback.
 - `validated_sql` wird zwischen Versuchen nicht geleert; das `sql`-Event erscheint nur bei einer
   Änderung.
-- `executeSql` fällt bei unbekannter Zieldatenbank auf den ersten Konnektor zurück.
+- `executeSql` braucht den Konnektor der Zieldatenbank. Fehlt er (z. B. `target_db` zeigt auf eine
+  Datenbank ohne antwortfähige Verbindung), endet der Lauf über die Fehlversuche mit
+  `unconstructable`; nur wenn gar keine Zieldatenbank bestimmt wurde und genau ein Konnektor
+  existiert, wird dieser verwendet.
+- **Akronyme ohne Beschreibung** erscheinen im Prompt nur mit ihrem Namen (früher als
+  `"- KPI: null"`).
 - Viele Prompt-Texte sind im Java-Code zusammengesetzt (z. B. `reconstructSql`,
   `informationAgent`). Wer den Prompt sucht, muss also auch in `Nodes` und `AgentPrompts` schauen,
   nicht nur in `prompts/`.

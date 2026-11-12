@@ -51,6 +51,113 @@ Und beachten:
 - **Virtual Threads** (`spring.threads.virtual.enabled=true`) und ein langes MVC-Async-Timeout
   (Chat-Läufe dauern Minuten) wie in `ao-app` setzen.
 
+## Code-Beispiele
+
+### Ein minimaler Host
+
+```java
+@SpringBootApplication
+public class MyHostApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(MyHostApplication.class, args);
+    }
+
+    /** Ersetzt den festen Benutzer: jede Stelle, die eine Benutzer-ID schreibt, nimmt diese Bean. */
+    @Bean
+    CurrentUser currentUser() {
+        return CurrentUser.fixed("data-team", "Data Team");
+    }
+
+    /** Ein zusätzlicher Schritt nach jedem Ingest – Auto-Ontology-Beans lassen sich normal injizieren. */
+    @Bean
+    ApplicationRunner registerStage(IngestService ingest) {
+        return args -> ingest.addStage(new IngestService.Stage() {
+            @Override
+            public void afterIngest(String databaseId, String databaseName) {
+                LoggerFactory.getLogger("host").info("Catalog of {} is up to date", databaseName);
+            }
+        });
+    }
+}
+```
+
+```yaml
+# application.yml des Hosts
+spring:
+  threads.virtual.enabled: true
+  mvc.async.request-timeout: 1800s            # Chat-Läufe dauern Minuten
+  datasource:
+    url: jdbc:postgresql://db:5432/host        # der Store legt seine Tabellen in dieser Datenbank an
+    username: host
+    password: ${DB_PASSWORD}
+ao:
+  api-prefix: /ontology                        # alles unter /ontology/…, kollidiert nicht mit Host-Pfaden
+  vector: { store: qdrant, dimensions: 1024, qdrant: { host: qdrant, port: 6334 } }
+  embedding: { provider: openai }
+  models:
+    defaults: { endpoint: http://llm:8000/v1, model: qwen3, api-key: "" }
+    embed:    { model: bge-m3 }
+  ingest:
+    connections:
+      - name: analytics
+        datasource-bean: analyticsDataSource   # eine vorhandene DataSource des Hosts wiederverwenden
+        schemas: [public]
+```
+
+### Eine Komponente ersetzen
+
+```java
+/** Eigenes Gateway, z. B. für einen Anbieter ohne OpenAI-kompatible API. */
+@Bean
+LlmGateway llmGateway(MyProviderClient client) {
+    return new LlmGateway() {
+        @Override
+        public <T> T structured(ModelRole role, List<LlmMessage> messages, Class<T> type) {
+            String schema = Json.write(OutputSchema.jsonSchema(type));      // dasselbe Schema wie im Standard-Gateway
+            String raw = client.complete(messages, schema);
+            try {
+                return StructuredParser.parse(raw, type);                    // strikt, inklusive validate()
+            } catch (RuntimeException e) {
+                throw new LlmException("Structured call " + type.getSimpleName() + " failed", e);
+            }
+        }
+
+        @Override
+        public String text(ModelRole role, List<LlmMessage> messages) {
+            return client.complete(messages, null);
+        }
+    };
+}
+```
+
+Weil alle Beans `@ConditionalOnMissingBean` sind, genügt die Definition im Host; in Tests markiert
+man sie mit `@Primary`:
+
+```java
+@TestConfiguration
+static class Stubs {
+    @Bean
+    @Primary
+    LlmGateway scripted() {
+        return new ScriptedLlmGateway().on(SQLGenerationModel.class,
+                prompt -> new SQLGenerationModel("count rows", "SELECT COUNT(*) FROM SALES.ORDERS", "The number of orders."));
+    }
+}
+```
+
+### Das Schema selbst migrieren
+
+```yaml
+ao.store.liquibase.enabled: false
+```
+
+```yaml
+# db/changelog/host-master.yaml des Hosts
+databaseChangeLog:
+  - include: { file: db/changelog/host/001-init.sql }
+  - include: { file: db/changelog/ao-changelog.yaml }     # liegt im Jar von ao-store
+```
+
 ## Komponenten abschalten oder ersetzen
 
 | Ziel | Mittel |

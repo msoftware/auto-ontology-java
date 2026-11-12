@@ -54,10 +54,9 @@ Für „Chart aus Frage“ (`/ask`, `/explore`) muss das Backend `ao-dashboard-d
 ### 2.3 Prüfen und bauen
 
 ```bash
-pnpm test                                        # Vitest von @jentsch/quasar-ontology
-pnpm --filter @jentsch/quasar-dashboard-nl test  # Vitest von @jentsch/quasar-dashboard-nl
+pnpm test                                        # Vitest beider Bibliotheken (ontology und dashboard-nl)
 pnpm typecheck                                   # vue-tsc für @jentsch/quasar-ontology
-pnpm --filter ao-demo typecheck                  # vue-tsc für die Demo-App
+pnpm --filter ao-demo typecheck                  # vue-tsc für die Demo-App (prüft auch das NL-Paket mit)
 pnpm build                                       # SPA nach apps/demo/dist/spa (Basis des Nginx-Images)
 ```
 
@@ -286,7 +285,7 @@ nutzt `bg-grey-2 text-black` und bleibt auch im Dark Mode hell.
 
 | Datei | Prüft |
 |---|---|
-| `packages/ontology/test/sse.test.ts` | SSE-Parser über Chunk-Grenzen und `[DONE]`; `rowsToQueryResult` (coltypes, Datum, Zeilenzahl); `parseChartBlocks`, `toCsv`, `entityLinks` |
+| `packages/ontology/test/sse.test.ts` | SSE-Parser über Chunk-Grenzen und `[DONE]`; `rowsToQueryResult` (coltypes, Datum, Zeilenzahl); `parseChartBlocks`, `toCsv`, `entityLinks`; `newUuid` mit und ohne `crypto.randomUUID` |
 | `packages/dashboard-nl/test/sse.test.ts` | `parseSse` über Chunk-Grenzen; gleiche i18n-Schlüssel in DE und EN |
 
 Vitest läuft in der **Node-Umgebung** (kein DOM). Komponententests, Browser-Tests, Screenshot-
@@ -305,14 +304,13 @@ mount(AoChatPage, { global: { plugins: [i18n, createQuasarOntology({ fetch })] }
 
 | # | Thema | Beschreibung | Wo |
 |---|---|---|---|
-| 1 | Root-Skripte decken nicht alles ab | `pnpm test` und `pnpm typecheck` laufen nur für `@jentsch/quasar-ontology`; das NL-Paket und die App müssen extra geprüft werden (Abschnitt 2.3) | `frontend/package.json` |
+| 1 | Root-`typecheck` nur für die Ontology-Bibliothek | `pnpm test` läuft für beide Bibliotheken. `pnpm typecheck` prüft nur `@jentsch/quasar-ontology`; das NL-Paket hat kein eigenes Skript und wird über `pnpm --filter ao-demo typecheck` mitgeprüft (Abschnitt 2.3). Der Typecheck der Bibliothek löst `@jentsch/quasar-dashboard` über `paths` in `packages/ontology/tsconfig.json` auf die **Quellen** des Nachbarrepositories auf (dessen `dist` ist nicht gebaut) | `frontend/package.json`, `packages/ontology/tsconfig.json` |
 | 2 | Native Browser-Dialoge | Umbenennen und Bestätigungen nutzen `window.prompt`/`window.confirm` (9 Stellen) statt Quasar-Dialogen; nicht übersetzbar gestylt, schwer zu testen | ontology-Seiten |
 | 3 | Kein ESLint | Die Regel „keine Rohtexte“ wird nicht automatisch geprüft; einzelne Rohtexte existieren (z. B. Label „Chart“ in `AoResultView`, „SQL“/„PQL“) | ontology |
 | 4 | Kein Mock-Modus | `@jentsch/mock-backend` ist Dev-Abhängigkeit der App, wird aber nicht genutzt; MSW-Handler für `/api/nl-chart/**` (FR-NLC-20) fehlen. Das Frontend braucht immer ein laufendes Backend | `apps/demo` |
 | 5 | Chat-Charts immer „nur Ansicht“ | `AoResultView` rendert jeden Chart-Block mit den SQL-Zeilen und zeigt den Hinweis „nur Ansicht“; die Aktion „Als Dashboard-Chart speichern“ für semantische Ergebnisse (FR-NLC-22) fehlt | `AoResultView.vue` |
 | 6 | Client-Prüfung unvollständig | `QdNlChartPrompt` ergänzt Plugin-Defaults, ruft aber `plugin.validate()` nicht auf (FR-NLC-13) | `QdNlChartPrompt.vue` |
-| 7 | Fehler beim Speichern | `save()` im NL-Prompt fängt Fehler der Dashboard-API nicht ab; es erscheint keine Meldung | `QdNlChartPrompt.vue` |
-| 8 | Varianten-Text | Varianten-Chips hängen „— als <viz_type>“ (deutsch) an die Frage, auch bei englischer UI | `QdNlChartPrompt.vue` |
+| 7 | Fehlermeldungen uneinheitlich | Einstellungen, Terms und der NL-Prompt zeigen Fehler in der Seite an; `AoDiscoveryPage.saveRule`, `AoAnalysisPage.remove` und das Laden einiger Seiten (`onMounted`) fangen Fehler noch nicht ab | ontology-Seiten |
 | 9 | Slot-Integrationen teilweise | „Mit Frage anpassen“ im Chart-Builder ist umgesetzt; „Chart per Frage hinzufügen“ im Dashboard und „Per Frage abwandeln“ in der Chart-Liste (FR-NLC-18) fehlen | `apps/demo` |
 | 10 | Layout in der App | Navigation und Header (`header-actions`-Slot) liegen in `MainLayout.vue` der Demo-App, nicht in der Bibliothek; ein Host baut sie selbst | `apps/demo` |
 | 11 | Exploration | Graph mit ECharts-Force-Layout statt sigma.js/graphology; für große Graphen langsamer | `AoExplorationPage.vue` |

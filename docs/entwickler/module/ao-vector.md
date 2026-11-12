@@ -107,6 +107,61 @@ Fehler (Qdrant nicht erreichbar, falsche Dimension) brechen damit den Start ab.
 - **Neues Label:** einfach mit neuem `label` schreiben; für Filter in der Suche das Label in der
   Abfrage angeben (z. B. `Retrieval.SEMANTIC_LABELS` in `ao-agent`).
 
+## Code-Beispiele
+
+### Schreiben und suchen
+
+```java
+float[] vector = embedder.embedPassages(List.of("Term: Customer. A person or company that buys.")).get(0);
+
+Map<String, Object> meta = new LinkedHashMap<>();   // LinkedHashMap: Payload-Werte dürfen null sein
+meta.put("id", termId);                             // die fachliche ID gehört immer auch in den Payload
+meta.put("label", "Term");
+meta.put("name", "Customer");                       // "name" im Payload: der In-Memory-Store liest ihn beim Laden daraus
+meta.put("database_name", "sales");
+
+vectors.upsert(VectorStore.SEMANTIC_LAYER, List.of(
+        new VectorRecord(termId, "Term: Customer. A person or company that buys.", "Term", "Customer", "sales",
+                meta, vector)));
+
+List<SearchHit> hits = vectors.search(VectorStore.SEMANTIC_LAYER, embedder.embedQuery("wholesale buyers"),
+        5,                                          // k
+        VectorFilter.of("sales", "Term", "ColumnAttribute"),   // Datenbank und Labels; null/leer = keine Einschränkung
+        0.75);                                      // maxDistance (Cosine-Distanz, kleiner = ähnlicher); null = keine Schwelle
+for (SearchHit h : hits) {
+    log.info("{} {} distance={} table={}", h.record().label(), h.record().name(), h.distance(), h.meta("table_id"));
+}
+```
+
+Treffer aus Qdrant tragen **keinen** Vektor (`record().vector()` ist leer) – gelesen wird nur der
+Payload. Alles, was ein Aufrufer später braucht (Tabellen-ID, Quellspalte, Ausdruck …), muss
+deshalb beim Schreiben in `metadata` stehen.
+
+### Löschen und abgleichen
+
+```java
+vectors.deleteByIds(VectorStore.SEMANTIC_LAYER, List.of(attributeId));           // einzelne Objekte
+vectors.deleteByFilter(VectorStore.SEMANTIC_LAYER, "sales", null);               // alles einer Datenbank
+vectors.deleteByFilter(VectorStore.SEMANTIC_LAYER, "sales", "Dataset");          // nur ein Label
+Set<String> stored = new HashSet<>(vectors.ids(VectorStore.DATA_LAYER, "sales")); // Abgleich gegen den Store
+```
+
+`deleteByFilter(collection, null, null)` leert die ganze Collection.
+
+### Einen eigenen Store gegen den Vertrag testen
+
+```java
+class MyVectorStoreTest extends VectorStoreContract {      // aus den Test-Quellen von ao-vector
+    @Override
+    protected VectorStore store() {
+        return new MyVectorStore(/* 4 Dimensionen wie im Vertrag */);
+    }
+}
+```
+
+Der Vertrag prüft die beiden Eigenschaften, auf die sich der Agent verlässt: Distanzen kommen
+aufsteigend zurück, und Filter nach Datenbank und Label greifen.
+
 ## Tests
 
 - `VectorStoreContract` (abstrakt): `searchReturnsDistancesSmallestFirstAndHonoursFilters` –

@@ -196,9 +196,11 @@ vorhandenen `DataSource`, ohne deren Pool zu übernehmen (FR-NLC-01). So erreich
 auch eine In-Memory-H2 im selben Prozess.
 
 **Nur lesend.** `ReadOnlySql` lässt für alle vom Agenten ausgeführten Statements nur ein einzelnes
-`SELECT`/`WITH` zu (FR-CON-05). Der Timeout kommt aus der Laufzeiteinstellung
+`SELECT`/`WITH` zu (FR-CON-05). Die Prüfung läuft rekursiv über das ganze Statement: Auch ein
+schreibendes CTE (`WITH d AS (DELETE … RETURNING *) SELECT …`), `SELECT … INTO` und
+`FOR UPDATE` in Unterabfragen werden abgelehnt. Der Timeout kommt aus der Laufzeiteinstellung
 `sql_query_timeout_seconds`. Trotzdem gilt: Quell-Datenbanken immer mit einem Benutzer mit reinen
-Leserechten anbinden.
+Leserechten anbinden – Funktionen mit Seiteneffekten erkennt keine Syntaxprüfung.
 
 **Tabellenfilter.** `TableFilter` wendet zentral bei der Extraktion an: Schema-Allowlist,
 `table_allow_regex` und `table_deny_regex` (Deny gewinnt, `find()` gegen den unqualifizierten
@@ -239,9 +241,15 @@ Fehler in den Stufen PII und Regeln werden geloggt, markieren den Ingest aber ni
 fehlgeschlagen (NFR-REL-01).
 
 **Scheduler** (`IngestScheduler`): läuft beim Start und danach alle `INGEST_INTERVAL_HOURS`
-(Default 24), gemessen ab Ende des letzten Laufs. Ein manueller Trigger setzt den Timer zurück. Eine
+(Default 24), gemessen ab Ende des letzten Laufs. Ein manueller Trigger setzt den Timer zurück; trifft
+er während eines Laufs ein, folgt genau ein weiterer Lauf direkt im Anschluss. Eine
 neu angelegte Verbindung löst sofort einen nicht-blockierenden Ingest aus; das Löschen einer
-Verbindung entfernt Katalog und Embeddings. Abschaltbar mit `ao.ingest.scheduler-enabled=false`.
+Verbindung entfernt die semantische Schicht der Datenbank, ihren Katalog und ihre Embeddings.
+Abschaltbar mit `ao.ingest.scheduler-enabled=false`.
+
+**Entfernte Objekte.** Verschwindet eine Tabelle oder Spalte aus der Quelle, löscht der Ingest
+neben den Katalogzeilen auch die zugehörigen ColumnAttributes und deren Embeddings. Terms bleiben
+erhalten (sie können mehrere Tabellen und Datenbanken beschreiben).
 
 **PII-Erkennung** (`PiiDetection`): Regeln aus `pii_detection/rules.py` (normalisierte Namen und
 Typen, Muster mit hoher Sicherheit). Treffer bekommen den Tag `PII`, verarbeitete Spalten
@@ -272,7 +280,10 @@ auf Attribute übertragen.
   Lauf an, ohne auf ihn zu warten.
 - `POST /api/semantic-compilation/reset` bricht einen laufenden Durchgang ab, löscht die
   semantische Schicht (aller oder einer Datenbank, inkl. Embeddings) und kompiliert neu, strikt in
-  dieser Reihenfolge. 202 heißt „angenommen“, nicht „fertig“.
+  dieser Reihenfolge. 202 heißt „angenommen“, nicht „fertig“. Ohne `database_name` werden **alle**
+  Datenbanken zurückgesetzt; ein unbekannter Name ergibt 404 und löscht nichts. Beim Reset einer
+  einzelnen Datenbank bleiben Terms erhalten, die auch Tabellen anderer Datenbanken beschreiben
+  (Terms werden über Name und Quelle zusammengeführt).
 - `GET /api/semantic-compilation/status` liefert `calculated` (mindestens ein Term existiert),
   `running`, den letzten Erfolg und den letzten Fehler.
 - `POST /api/semantic-compilation/trigger` ist eine dokumentierte Erweiterung (im Original nur
@@ -323,7 +334,8 @@ OpenAI). Ein leerer API-Key ist erlaubt; dann wird kein `Authorization`-Header g
 
 - `structured(role, messages, Class<T>)` füllt einen Java-Record (strict, unbekannte Felder schlagen
   fehl). Parse- und Validierungsfehler werden mit Backoff wiederholt (`ao.llm.max-retries`,
-  Default 3). Für `NON_REASONING` folgt danach ein Fallback auf `REASONING`.
+  Default 3; nach dem letzten Versuch ohne Pause). Für `NON_REASONING` folgt danach ein Fallback
+  auf `REASONING`.
 - `tryStructured(...)` liefert `Optional.empty()` statt einer Exception.
 - `text(role, messages)` für Freitext.
 
@@ -504,6 +516,9 @@ In Ruhephasen schickt der Server SSE-Kommentare `: ping`. Antwort-Header: `text/
   `Statement.cancel()`.
 - `GET /api/chat/watch?conversation_id=…` hängt sich an einen laufenden Lauf an und liefert alle
   Events **von Beginn an** aus dem Puffer, danach live. Läuft nichts, endet der Stream sofort.
+  Replay und Anmeldung sind ein atomarer Schritt: Ein Watcher verpasst kein Event und erhält auch
+  dann `[DONE]`, wenn der Lauf während des Anhängens endet. Watcher bekommen wie der anfragende
+  Client alle 15 s einen Ping.
 - `POST /api/chat/cancel` bricht den Lauf einer Konversation ab.
 
 **Speicherung im Backend** (läuft auch weiter, wenn der Client getrennt ist):
@@ -686,7 +701,7 @@ Frage ─▶ Dataset-Auswahl (Vektorsuche label='Dataset', Distanz ≤ 0,75)
       ─▶ LLM: viz_type + ChartParams (strukturiert, Viz-Katalog)
       ─▶ Validierung: Katalog → Spalten/Metriken/Rollen → query_context (buildQuery-Port)
                       → Kompilierung durch die Dashboard-Engine; Filterwerte gegen echte Werte
-      ─▶ bei Fehler bis zu 2 Reparaturrunden
+      ─▶ bei Fehler bis zu 2 Reparaturrunden; bleibt der Vorschlag ungültig: error-Event und Ende
       ─▶ chart_suggestion (Vorschau im QdChartRenderer)
       ─▶ Speichern ausschließlich über POST /api/v1/chart/ der Dashboard-API
 ```
@@ -694,7 +709,7 @@ Frage ─▶ Dataset-Auswahl (Vektorsuche label='Dataset', Distanz ≤ 0,75)
 | Modus | Wann | Ergebnis |
 |---|---|---|
 | **A, `semantic`** | Ein registriertes Dataset deckt die Frage ab | vollwertiger Dashboard-Chart, speicherbar, im Chart-Builder bearbeitbar |
-| **B, `sql`** | Kein Dataset passt | der Text-to-SQL-Agent liefert SQL und Zeilen; `SqlResults` wandelt sie in ein `QueryResult` für den gesteuerten Modus des Renderers; nur Ansicht, nicht speicherbar |
+| **B, `sql`** | Kein Dataset passt (das LLM wählt keines) – nicht nach einer gescheiterten Validierung | der Text-to-SQL-Agent liefert SQL und Zeilen; `SqlResults` wandelt sie in ein `QueryResult` für den gesteuerten Modus des Renderers; nur Ansicht, nicht speicherbar |
 
 ### 8.2 Bausteine
 
@@ -990,8 +1005,11 @@ denselben Store und denselben Vektorstore.
 ```bash
 cd backend && ./gradlew test             # ohne Docker: H2 + eingebettetes PostgreSQL
 cd backend && ./gradlew integrationTest  # Testcontainers: Qdrant, Oracle Free, SQL Server
-cd frontend && pnpm test && pnpm --filter ao-demo typecheck && pnpm build
+cd frontend && pnpm test && pnpm typecheck && pnpm --filter ao-demo typecheck && pnpm build
 ```
+
+`pnpm test` führt die Vitest-Suiten beider Bibliotheken aus (`@jentsch/quasar-ontology` und
+`@jentsch/quasar-dashboard-nl`).
 
 Compiler-Optionen `-parameters -Xlint:all,-processing,-serial -Werror`. Tests laufen mit
 `user.timezone=UTC` und englischer Locale. JaCoCo erzeugt XML- und HTML-Berichte unter
@@ -1000,21 +1018,24 @@ Compiler-Optionen `-parameters -Xlint:all,-processing,-serial -Werror`. Tests la
 
 | Test | Modul | Prüft |
 |---|---|---|
-| `StoreSchemaTest` | `ao-store` | Schema und Round-Trips auf H2 und eingebettetem PostgreSQL, wiederholbare Migration |
+| `StoreSchemaTest` | `ao-store` | Schema und Round-Trips auf H2 und eingebettetem PostgreSQL, wiederholbare Migration, Reset einer Datenbank bei geteilten Terms |
 | `InMemoryVectorStoreTest`, `QdrantVectorStoreIT` (über `VectorStoreContract`) | `ao-vector` | gleicher Vertrag für beide Vektorstores (Reihenfolge, Distanzen) |
-| `LangChain4jLlmGatewayTest`, `ConfigurationReportTest` | `ao-llm` | Structured Output je Modus, Jackson-3-Modus, Maskierung im Bericht |
+| `LangChain4jLlmGatewayTest`, `ConfigurationReportTest`, `PromptsTest` | `ao-llm` | Structured Output je Modus, Jackson-3-Modus, Maskierung im Bericht, Füllen der Prompt-Platzhalter |
+| `ReadOnlySqlTest` | `ao-connectors` | Read-only-Regel inklusive schreibender CTEs und `FOR UPDATE` auf jeder Ebene; Datenbankname aus der JDBC-URL |
 | `H2SourceTest`, `H2UpperCaseSourceTest`, `PostgresSourceTest`, `OracleSourceIT`, `SqlServerSourceIT` (über `ConnectorContract`) | `ao-connectors` | gleicher Konnektor-Vertrag je Engine (Spalten, Typen, `is_nullable` Boolean, PKs, FKs, Views) |
-| `IngestServiceTest` | `ao-ingestion` | Ingest, Diff, Historie, Ersetzungslogik der Embeddings |
+| `IngestServiceTest` | `ao-ingestion` | Ingest, Diff, Historie, Embeddings; ColumnAttributes entfernter Spalten, Löschen einer Datenbank samt semantischer Schicht, Trigger während eines Laufs |
+| `SemanticResetTest` | `ao-semantic` | Reset einer, aller und einer unbekannten Datenbank |
+| `SqlStaticChecksTest` | `ao-agent` | statische SQL-Prüfung: Katalognamen, Pseudospalten, Aliase, Read-only, PostgreSQL-Quoting |
 | `QueryContextBuilderTest` | `ao-nl-chart` | `buildQuery`-Port je Viz-Typ |
 | `DemoEndToEndTest` | `ao-app` | Demo-Ende-zu-Ende mit gestubbtem LLM: Ingest, Kompilierung, Chat |
 | `OpenApiContractTest` | `ao-app` | generiertes OpenAPI gegen die Referenz des Originals (Allowlist für entfallene Anmelde-Endpunkte) |
 | `CustomApiPrefixTest` | `ao-app` | mit `ao.api-prefix=/ao` antwortet alles unter `/ao/…`, `/api/…` ergibt 404; ungültige Präfixe brechen den Start ab |
 | `McpServerTest` | `ao-app` | MCP-Server und Tools |
 | `NlChartIntegrationTest` | `ao-dashboard-demo` | NL-Chart-Pipeline gegen die echte Dashboard-Engine |
-| `sse.test.ts` | Frontend-Pakete | SSE-Parser (geteilte Chunks, `[DONE]`) |
+| `sse.test.ts` | Frontend-Pakete | SSE-Parser (geteilte Chunks, `[DONE]`), Ergebnis-Hilfsfunktionen, `newUuid` |
 
-Letzter dokumentierter Lauf (Testberichte vom 2026-11-10): alle 46 Tests des Standard-Builds grün,
-ein Test übersprungen. Die Integrationstests sind geschrieben, wurden aber ohne Docker noch nicht
+Letzter dokumentierter Lauf (Testberichte vom 2026-11-12): alle 78 Tests des Standard-Builds grün,
+ein Test übersprungen; im Frontend 6 Vitest-Tests grün. Die Integrationstests sind geschrieben, wurden aber ohne Docker noch nicht
 ausgeführt. Die JaCoCo-Schwellen 90/80 sind konfiguriert, aber nicht an `check` gebunden und werden
 noch nicht erreicht.
 

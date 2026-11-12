@@ -93,13 +93,19 @@ Das UI-JSON wird von `fromJson` gelesen und akzeptiert zwei Formen:
    - Datenbank anlegen/aktualisieren (bei UI-Verbindungen bleibt das gespeicherte JSON erhalten),
    - Schemas, Tabellen, Spalten per Upsert unter **stabilen IDs** (Schlüssel `schema.table`
      bzw. `schema.table.column`),
-   - nicht mehr vorhandene Tabellen, Spalten und Schemas löschen (Kaskade räumt abhängige Zeilen),
+   - nicht mehr vorhandene Tabellen, Spalten und Schemas löschen (Kaskade räumt abhängige Zeilen).
+     **Vorher** werden die ColumnAttributes dieser Tabellen und Spalten gelöscht
+     (`SemanticRepository.attributeIdsOf` / `deleteAttributes`): `column_attribute.table_id` hat
+     keinen Fremdschlüssel, die Attribute blieben sonst als Waisen zurück,
    - deklarierte FKs upserten und nicht gesehene über `last_seen` entfernen,
    - `pulled` setzen.
-4. Embeddings entfernter Tabellen und Spalten löschen.
+4. Embeddings entfernter Tabellen und Spalten (`data_objects_layer`) und der mit ihnen gelöschten
+   ColumnAttributes (`semantic_layer`) löschen. `WriteResult` trägt dafür `removedTableIds`,
+   `removedColumnIds` und `removedAttributeIds`.
 5. Query-Historie schreiben: je Statement Hash des normalisierten Texts, Zähler, letzte Ausführung,
    Verknüpfung zu Tabellen und Spalten, beobachtete Joins und Unions als `column__join` /
-   `column__union` mit Referenz `"<sql id>|<condition>"`.
+   `column__union` mit Referenz `"<sql id>|<condition>"`. Ein Statement, das der Parser nicht
+   auswerten kann, wird übersprungen (DEBUG-Log) – es bricht den Ingest der Datenbank nicht ab.
 6. `Stage.afterCatalogWrite` – PII-Erkennung.
 7. `DataLayerEmbedder.embedDatabase`: Zeilen bauen, in Chunks zu 128 einbetten. Der alte Bestand
    der Datenbank wird **unmittelbar vor dem ersten Upsert** gelöscht; scheitert schon das erste
@@ -111,8 +117,12 @@ Fehler in Stages werden als WARN geloggt und brechen den Ingest nicht ab (NFR-RE
 `runAll()` ingestet alle Verbindungen nacheinander; der Fehler einer Datenbank stoppt die anderen
 nicht.
 
-`deleteDatabase(name)` löscht Katalog (Kaskade), beide Vektor-Layer der Datenbank und frischt die
-Konnektoren auf.
+`deleteDatabase(name)` löscht **zuerst die semantische Schicht** der Datenbank
+(`SemanticRepository.deleteSemanticLayer`: Terms, ColumnAttributes, SqlAttributes, Custom Analyses –
+geteilte Terms bleiben, siehe [`ao-store`](ao-store.md)), dann den Katalog (Kaskade) und beide
+Vektor-Layer, und frischt die Konnektoren auf. Die Reihenfolge ist zwingend: Terms und Attribute
+sind nur über die Katalogtabellen auffindbar. Die Methode wartet auf einen laufenden Ingest (dasselbe
+Lock wie `run`).
 
 ### Scheduler
 
@@ -120,7 +130,10 @@ Konnektoren auf.
   wenn `ao.ingest.scheduler-enabled`.
 - Nach jedem Lauf wird der nächste in `ao.ingest.interval-hours` geplant – gemessen ab **Ende** des
   Laufs.
-- `trigger()` storniert den geplanten Lauf und startet sofort (nicht blockierend).
+- `trigger()` storniert den geplanten Lauf und startet sofort (nicht blockierend). Kommt der
+  Trigger, **während ein Lauf läuft**, wird er nur vermerkt; der nächste Lauf startet dann direkt
+  im Anschluss statt nach dem Intervall. Es gibt immer genau eine geplante Aufgabe – ein zweiter
+  `schedule`-Aufruf würde eine zweite, sich endlos selbst verlängernde Timer-Kette erzeugen.
 - `onRunCompleted(hook)` – der Kompilierungs-Scheduler wartet so auf den ersten Ingest.
 - Ein Single-Thread-Executor auf Virtual Threads; Läufe überlappen nie.
 
@@ -149,8 +162,10 @@ und prüft Regellisten aus `pii_detection/rules.py`:
 Ergebnis: Kategorie, `not_pii` oder `null` (unentschieden). Treffer bekommen den Tag `PII` (mit
 dem festen Benutzer als `tagged_by`); alle bewerteten Spalten `pii_processed = true`. Verarbeitete
 Spalten werden nie erneut bewertet – ein manuell entfernter Tag bleibt entfernt. `propagate()`
-(nach der Kompilierung) überträgt PII auf ColumnAttributes und SqlAttributes. `isPii(columnId)`
-nutzen Agent und Kompilierung, um Beispielwerte nicht an externe LLMs zu geben.
+(nach der Kompilierung) überträgt PII auf ColumnAttributes und SqlAttributes. Agent und
+Kompilierung fragen mit `piiColumnIds()` **einmal** alle PII-Spalten ab, um Beispielwerte nicht an
+externe LLMs zu geben; `isPii(columnId)` (zwei Store-Abfragen je Aufruf) ist nur für Einzelprüfungen
+gedacht.
 
 ### Suche und Regeln
 
@@ -158,7 +173,10 @@ nutzen Agent und Kompilierung, um Beispielwerte nicht an externe LLMs zu geben.
   `Database`, `Schema`, `Table`, `View`, `Column`, `CustomAnalysis`, Terms und Attribute; Filter nach
   Typ, Tag (inkl. `(blanks)` für „ohne Tag“) und Datenbereich; optional in Beschreibungen. Ranking:
   Name enthält alle Tokens → Synonym als ganzes Wort → kürzerer Name. Höchstens 200 Treffer
-  (`CAP`); `count` ist ungedeckelt.
+  (`CAP`); `count` ist ungedeckelt. Synonyme liegen als JSON-Text in der Spalte; der SQL-Filter
+  trifft deshalb auch Klammern und Anführungszeichen. Ein Term zählt nur als Treffer, wenn der
+  Suchtext im Namen, (bei eingeschalteter Option) in der Beschreibung oder in einem **einzelnen
+  Synonym** vorkommt.
 - `RuleService.apply(rule)` führt die gespeicherte Suche aus und setzt die Tags der Regel auf genau
   diese Treffer (mit `rule_id`). `replayAll()` nach Ingest bzw. Kompilierung; Fehler werden nur
   geloggt.
@@ -181,6 +199,104 @@ nutzen Agent und Kompilierung, um Beispielwerte nicht an externe LLMs zu geben.
 - **Bean ersetzen:** z. B. ein eigener `ConnectionService` für einen Credential-Store (Vault).
 - **Neue Suchtypen:** in `SearchService.TYPES` und `tagTarget` ergänzen.
 
+## Code-Beispiele
+
+### Einen Schritt in den Ingest einhängen
+
+```java
+@AutoConfiguration(after = IngestionAutoConfiguration.class)
+public class FreshnessAutoConfiguration {
+    @Bean
+    public FreshnessCheck aoFreshnessCheck(IngestService ingest, CatalogRepository catalog) {
+        FreshnessCheck check = new FreshnessCheck(catalog);
+        ingest.addStage(new IngestService.Stage() {
+            @Override
+            public void afterCatalogWrite(String databaseId, String databaseName) {
+                // Katalog steht im Store, die Embeddings folgen erst: hier ändern, was eingebettet werden soll
+                check.markStaleTables(databaseId);
+            }
+
+            @Override
+            public void afterIngest(String databaseId, String databaseName) {
+                check.report(databaseName);            // alles fertig, auch die Embeddings
+            }
+        });
+        return check;
+    }
+}
+```
+
+Eine Exception in einer Stage wird als WARN geloggt und bricht den Ingest nicht ab. Beide Methoden
+sind `default` – man überschreibt nur, was man braucht.
+
+### Ingest von Hand auslösen
+
+```java
+ingestScheduler.trigger();                          // alle Verbindungen, nicht blockierend, setzt den Timer zurück
+
+ConnectionSpec spec = connections.ingestConnections().get(0);
+IngestService.Result r = ingest.run(spec);          // eine Verbindung, blockierend (wartet auf das Lock)
+log.info("{}: {} Tabellen, +{} -{}, {} Statements, {} Embeddings",
+        r.databaseName(), r.tables(), r.added(), r.removed(), r.queries(), r.embedded());
+```
+
+```bash
+curl -X POST localhost:8080/internal/ingest          # dasselbe von außen (Worker-Endpunkt)
+```
+
+### Verbindungen konfigurieren
+
+```yaml
+ao:
+  ingest:
+    connections:
+      - name: erp                                    # der Datenbankname in Katalog und Vektorstore
+        url: jdbc:oracle:thin:@//ora:1521/ERP
+        schemas: [SALES, MASTERDATA]                 # Allowlist, case-insensitiv
+        table-allow-regex: ^(ORD|CUST|INV)           # find() auf dem unqualifizierten Namen
+        table-deny-regex: (_BAK|_TMP)$               # Deny gewinnt
+      - name: analytics
+        datasource-bean: analyticsDataSource         # vorhandene DataSource des Hosts, kein eigener Pool
+```
+
+```java
+TableFilter filter = new TableFilter(List.of("SALES"), "^(ORD|CUST)", "_BAK$");
+filter.allows("sales", "ORDERS");        // true  – Schema case-insensitiv
+filter.allows("SALES", "ORDERS_BAK");    // false – Deny gewinnt
+filter.allows("HR", "ORDERS");           // false – Schema nicht in der Allowlist
+filter.allows("SALES", "orders");        // false – Regex case-sensitiv
+```
+
+### Beobachtetes SQL auswerten
+
+```java
+QueryHistoryParser.Parsed p = QueryHistoryParser.parse(
+        "select c.name, count(*) from s.orders o join s.customers c on o.customer_id = c.id group by c.name;");
+p.sql();       // normalisiert: Leerraum zusammengezogen, ohne Semikolon – Basis des Hashes
+p.tables();    // [s.orders, s.customers]
+p.joins();     // [ColumnPair[left=s.orders.customer_id, right=s.customers.id, condition="o.customer_id = c.id"]]
+p.columns();   // alle aufgelösten Spaltenreferenzen
+
+QueryHistoryParser.parse("UPDATE t SET a = 1");                                     // null: kein lesendes Statement
+QueryHistoryParser.parse("WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d");  // null: schreibendes CTE
+```
+
+### PII-Regeln und Suche
+
+```java
+PiiDetection.evaluate("CUSTOMERS", "EMAIL");          // "email_address"  (DIRECT)
+PiiDetection.evaluate("people", "full_name");         // "person_name"    (CONDITIONAL, Personentabelle)
+PiiDetection.evaluate("products", "name");            // "not_pii"
+PiiDetection.evaluate("customers", "customerName");   // null             (unentschieden → kein Tag)
+
+Set<String> pii = piiDetection.piiColumnIds();        // einmal holen, dann je Spalte nur noch contains()
+
+List<Map<String, Object>> hits = search.search(SearchService.request(Map.of(
+        "search_term", "customer",
+        "filters", Map.of("objects", List.of("Table", "Term"), "description", true))));
+// je Treffer: id, type, name, description, certified, parent_id, synonyms, breadcrumbs
+```
+
 ## Tests
 
 `IngestServiceTest` (H2, In-Memory-Vektorstore, Hash-Embedding):
@@ -190,16 +306,20 @@ nutzen Agent und Kompilierung, um Beispielwerte nicht an externe LLMs zu geben.
 | `ingestWritesCatalogHistoryAndEmbeddings` | Katalog, Query-Historie und Data-Layer-Embeddings nach einem Lauf |
 | `textsFollowTheRetrievalContract` | exaktes Textformat von `EmbeddingTexts` |
 | `piiRules` | Entscheidungen von `PiiDetection.evaluate` |
-| `parserFindsJoinsAndRejectsDml` | `QueryHistoryParser`: Joins erkannt, DML/DDL ignoriert |
+| `semanticLayerFollowsTheCatalog` | entfernte Spalte nimmt ihr ColumnAttribute samt Embedding mit; `deleteDatabase` löscht auch Terms und Attribute |
+| `triggerDuringARunDoesNotDuplicateTheSchedule` | ein Trigger während eines Laufs führt zu genau einem Folgelauf |
+| `parserFindsJoinsAndRejectsDml` | `QueryHistoryParser`: Joins erkannt, DML/DDL und schreibende CTEs ignoriert, lesende CTEs und Unterabfragen ausgewertet |
 | `incompleteExtractionFails` | Vollständigkeitsprüfung des Extraktors |
 
-Nicht eigens getestet sind die Ersetzungslogik bei fehlschlagendem Embedding, der Scheduler und
+Nicht eigens getestet sind die Ersetzungslogik bei fehlschlagendem Embedding und
 `SearchService`/`RuleService`; sie laufen nur indirekt im E2E-Test von `ao-app` mit.
 
 ## Fallstricke
 
-- **Umbenennen ist Löschen + Anlegen.** Eine umbenannte Tabelle bekommt eine neue ID; Terms,
-  Attribute und Tags der alten Tabelle verschwinden per Kaskade.
+- **Umbenennen ist Löschen + Anlegen.** Eine umbenannte Tabelle bekommt eine neue ID. Ihre
+  ColumnAttributes, Semantic FKs, Tags und die Zuordnungen zu Terms verschwinden; die Terms selbst
+  bleiben (ohne Tabelle) bestehen. Die neue Tabelle hat keinen Term und wird beim nächsten
+  Kompilierungslauf neu bearbeitet.
 - **Credentials im Klartext:** UI-Verbindungen speichern das Passwort im JSON von
   `catalog_database.connection`. Die API gibt es nie zurück, aber Store-Backups enthalten es.
 - Das aus `host`/`port` gebaute SQL-Server-URL setzt `trustServerCertificate=true`.

@@ -88,6 +88,7 @@ ignoriert. Nach `[DONE]` bricht `readStream` den Reader ab.
 | `parseChartBlocks(content)` | ` ```chart\n{…}\n``` `-Blöcke einer gespeicherten Nachricht → `ChartBlock[]` |
 | `toCsv(rows)` | CSV mit Quoting von `"`, `,` und Zeilenumbrüchen |
 | `entityLinks(text)` | `[[[Name/id]]]` → Teile `{text, id?}` für Links im Antworttext |
+| `newUuid()` | UUID v4 für neue Konversationen. Nutzt `crypto.randomUUID()`, wo vorhanden; sonst `crypto.getRandomValues` bzw. `Math.random`. `randomUUID` gibt es nur in sicheren Kontexten (HTTPS oder `localhost`) – über `http://<intern>` würde das Senden sonst mit einem `TypeError` scheitern |
 
 ## Seiten
 
@@ -123,7 +124,7 @@ interface Turn {
 
 **Ablauf beim Senden:**
 
-1. Ohne aktive Konversation erzeugt die Seite eine UUID (`crypto.randomUUID()`) und meldet sie per
+1. Ohne aktive Konversation erzeugt die Seite eine UUID (`newUuid()`) und meldet sie per
    `focus` an den Host (das Backend legt die Konversation beim ersten Request an).
 2. Ein neuer `Turn` mit `running: true` wird angehängt.
 3. `ao.stream('/chat/completions', {question, conversation_id}, …)`; jedes Event läuft durch
@@ -135,6 +136,26 @@ interface Turn {
 Nachrichten auf (erste Assistenten-Nachricht = Antwort + SQL, zweite = Chart-Blöcke bzw.
 `sql_response`). Hat die letzte Frage noch keine Antwort, hängt sich die Seite per
 `/chat/watch?conversation_id=…` an; das Backend spielt alle Events von Anfang an ab.
+
+Dabei wichtig: Der Turn, in den die Events geschrieben werden, muss aus `turns.value` stammen.
+
+```ts
+turns.value = list
+const last = turns.value[turns.value.length - 1]   // reaktiver Proxy
+// const last = list[list.length - 1]              // FALSCH: das rohe Objekt – Änderungen lösen kein Rendering aus
+if (last && last.answer === undefined) {
+  last.running = true
+  void consume((onEvent, signal) => ao.watch(`/chat/watch?conversation_id=${id}`, onEvent, signal), last)
+}
+```
+
+Vue verfolgt nur Zugriffe über den Proxy, den `ref` um das Array legt. Mit dem rohen Objekt liefen
+die wieder abgespielten Schritte und die Antwort zwar ein, erschienen aber nicht.
+
+**Ein Stream zur Zeit:** `consume` bricht einen noch offenen Stream ab, bevor es einen neuen
+startet (z. B. beim Wechsel der Konversation während einer laufenden Antwort), und räumt am Ende nur
+den **eigenen** `AbortController` weg. Der Lauf im Backend läuft weiter und lässt sich über `watch`
+wieder aufnehmen.
 
 **Abbrechen:** `POST /chat/cancel` und danach `AbortController.abort()`. Ein `AbortError` wird nicht
 als Fehler angezeigt.
@@ -151,7 +172,9 @@ vorhanden sind – einen Umschalter Chart/Tabelle. Mehrere Charts erscheinen als
 Charts in einem Live-Lauf erst nach den Zeilen, wechselt die Ansicht automatisch auf den Chart.
 Gerendert wird mit `QdChartRenderer` im gesteuerten Modus (`:params="chartParams(c)"`,
 `:results="[rowsToQueryResult(rows, sql)]"`). Die Tabelle ist eine `q-table` mit Spalten aus den
-Schlüsseln der ersten Zeile.
+Schlüsseln der ersten Zeile. Ergebniszeilen haben keinen eindeutigen Schlüssel (und dürfen sich
+wiederholen); `tableRows` ergänzt deshalb je Zeile die Position als `__index` und nutzt sie als
+`row-key`. Ohne eindeutigen Schlüssel gerät das Rendering beim Sortieren und Blättern durcheinander.
 
 ### `AoTermsPage`
 
@@ -205,7 +228,9 @@ Linke Liste der Abschnitte, rechts der Inhalt. Der Abschnitt kommt über `sectio
 | `importExport` | Export als YAML-Download, Import per Datei (mit Bestätigung, `replace=true`) | `/model/export`, `/model/import` |
 
 Alle Aktionen laufen über `run(fn, okMessage?)`, das Fehler (`AoApiError.message`) und
-Erfolgsmeldungen in der Seite anzeigt.
+Erfolgsmeldungen in der Seite anzeigt. Auch das Laden eines Abschnitts (`load`) und der Export fangen
+Fehler ab – ein nicht erreichbares Backend erscheint als Meldung statt als unbehandelte Promise-
+Ablehnung in der Konsole.
 
 ## Texte (`src/i18n`)
 
@@ -223,10 +248,115 @@ ergänzen.
 4. Export in `src/index.ts`.
 5. Im Host: Route und Menüeintrag (siehe [`demo-app.md`](demo-app.md)).
 
+## Code-Beispiele
+
+### Eine Seite mit Laden, Speichern und Fehleranzeige
+
+```vue
+<script setup lang="ts">
+import { onMounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useAo } from '../plugin'
+
+const emit = defineEmits<{ (e: 'open', id: string): void }>()   // Navigation gehört dem Host
+const ao = useAo()
+const { t } = useI18n()
+type Row = Record<string, unknown>
+const items = ref<Row[]>([])
+const error = ref<string | null>(null)
+
+/** Jede Aktion läuft hier durch: Fehler landen in der Seite, nie unbehandelt in der Konsole. */
+async function run<T>(fn: () => Promise<T>): Promise<T | undefined> {
+  error.value = null
+  try {
+    return await fn()
+  } catch (e) {
+    error.value = (e as Error).message          // AoApiError.message = "detail" bzw. "error" der API
+    return undefined
+  }
+}
+
+async function load() {
+  const r = await run(() => ao.get<{ data: Row[] }>('/custom-analyses?limit=100'))
+  if (r) items.value = r.data
+}
+
+async function rename(item: Row, name: string) {
+  if (await run(() => ao.put(`/custom-analyses/${item.id}`, { name }))) await load()
+}
+
+onMounted(load)
+</script>
+
+<template>
+  <div class="q-pa-md" data-testid="ao-xyz">
+    <q-banner v-if="error" class="bg-negative text-white">{{ t('ao.common.error', { message: error }) }}</q-banner>
+    <q-list bordered separator>
+      <q-item v-for="i in items" :key="String(i.id)" clickable @click="emit('open', String(i.id))">
+        <q-item-section>{{ i.name }}</q-item-section>
+      </q-item>
+    </q-list>
+  </div>
+</template>
+```
+
+### Der API-Client
+
+```ts
+const ao = useAo()                                        // in Komponenten; außerhalb: createAoClient({ baseUrl, apiPrefix })
+
+const terms = await ao.get<{ terms: Row[]; total: number }>(`/terms?limit=50&query=${encodeURIComponent(q)}`)
+await ao.patch(`/terms/${id}`, { description: 'A buyer of goods' })
+await ao.del(`/sql-attributes/${attrId}`)
+
+try {
+  await ao.post('/sql-attributes', { name, description, expression, term_id: id })
+} catch (e) {
+  if (e instanceof AoApiError && e.status === 409) {      // Name schon vergeben
+    message.value = e.message
+  } else throw e
+}
+```
+
+### Einen Stream lesen
+
+```ts
+const abort = new AbortController()
+await ao.stream('/chat/completions', { question, conversation_id: newUuid() }, (e) => {
+  switch (e.type) {
+    case 'step':   /* e.node, e.label, e.phase ('start' | 'end'), e.thought */ break
+    case 'sql':    /* e.sql */ break
+    case 'result': /* e.answer.response, e.answer.sql_code, e.answer.sql_response_from_db */ break
+    case 'charts': /* e.content: ChartBlock[], e.sql_response */ break
+    case 'error':  /* e.message, e.node, e.error_type */ break
+  }
+}, abort.signal)                                          // kehrt bei [DONE] oder Stream-Ende zurück
+abort.abort()                                             // bricht nur das Lesen ab; den Lauf beendet POST /chat/cancel
+```
+
+### Ergebnisse rendern
+
+```vue
+<AoResultView :rows="rows" :charts="charts" :sql="sql" />
+```
+
+```ts
+import { rowsToQueryResult, parseChartBlocks, toCsv, entityLinks } from '@jentsch/quasar-ontology'
+
+rowsToQueryResult([{ month: '2025-06-01', revenue: 1234.5 }], sql)
+// { colnames: ['month', 'revenue'], coltypes: [2, 0], rowcount: 1, data: [{ month: 1748736000000, revenue: 1234.5 }], … }
+
+parseChartBlocks('```chart\n{"viz_type":"bar","params":{"x_axis":"region","metrics":["revenue"]},"mode":"sql"}\n```')
+// [{ viz_type: 'bar', params: {…}, mode: 'sql' }]
+
+entityLinks('Total [[[Revenue/3f2a…]]] by region')
+// [{ text: 'Total ' }, { text: 'Revenue', id: '3f2a…' }, { text: ' by region' }]
+```
+
 ## Tests
 
 `test/sse.test.ts` (Vitest, Node): SSE-Parser, `rowsToQueryResult`, `parseChartBlocks`, `toCsv`,
-`entityLinks`. Für die Seiten gibt es keine Tests.
+`entityLinks`, `newUuid`. Für die Seiten gibt es keine Tests.
 
 ```bash
 pnpm --filter @jentsch/quasar-ontology test

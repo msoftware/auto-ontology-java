@@ -13,6 +13,7 @@ unter [`module/`](module/). Das Frontend (Vue/Quasar) beschreibt das
 | eine Funktion ändern willst | Abschnitt 7 („Wo finde ich was?“) und das Dokument des betroffenen Moduls |
 | die Architektur verstehen willst | Abschnitte 4, 6 und 8, danach die Moduldokumente in Abhängigkeitsreihenfolge |
 | einen Fehler suchst | Abschnitt 9 („Fallstricke“) und den Abschnitt „Fallstricke“ im Moduldokument |
+| Code zum Abschreiben suchst | Abschnitt 11 („Kochbuch“) und die Abschnitte „Code-Beispiele“ der Moduldokumente |
 
 ---
 
@@ -681,9 +682,14 @@ diese Bean ersetzen. Es gibt keine 401/403-Antworten und keine Spring-Security-A
 ### 5.5 Eine Uhr
 
 `AoTime` kapselt die gemeinsame `Clock`. Reihenfolge: `ao.clock.fixed-now` → eine vorhandene
-`Clock`-Bean (z. B. `quasarDashboardClock`) → System-UTC. **Nie** `Instant.now()` oder
-`LocalDate.now()` direkt verwenden, sonst rechnen Demo, Tests und Prompts („heute ist …“)
-unterschiedlich.
+`Clock`-Bean (z. B. `quasarDashboardClock`) → System-UTC. Ein Host kann auch eine eigene
+`AoTime`-Bean definieren. **Nie** `Instant.now()` oder `LocalDate.now()` direkt verwenden, sonst
+rechnen Demo, Tests und Prompts („heute ist …“) unterschiedlich.
+
+```java
+Instant now = time.now();          // statt Instant.now()
+LocalDate today = time.today();    // statt LocalDate.now(); immer UTC
+```
 
 ### 5.6 Fehlerformate
 
@@ -697,7 +703,9 @@ unberührt bleiben. Validierungsfehler werden zu FastAPI-artigen 422-Antworten.
 `CancellationToken` ist ein Flag plus Abbruch-Hooks. Ein Lauf bindet sein Token per `bind()` an den
 Thread (`ThreadLocal`). `JdbcSourceDatabase.execute` registriert dann automatisch
 `Statement.cancel()` als Hook. `AgentGraph` prüft das Token vor jedem Knoten, der Compiler vor jeder
-Tabelle. Es werden nie Threads hart beendet.
+Tabelle. Es werden nie Threads hart beendet. Ein Abbruch erreicht den Aufrufer immer als
+`CancelledException` – auch wenn er mitten in einem Agent-Knoten (während der SQL-Ausführung)
+passiert.
 
 ### 5.8 Nebenläufigkeit
 
@@ -708,15 +716,24 @@ Tabelle. Es werden nie Threads hart beendet.
   (`ao.semantic.llm-max-inflight`).
 - Ingest-Läufe sind über ein `ReentrantLock` serialisiert, Kompilierungsläufe über ein
   `AtomicBoolean`, Entity-Coverage-Läufe ebenfalls.
-- Je Konversation ist genau ein Chat-Lauf aktiv (`ChatService.runs`).
+- Je Konversation ist genau ein Chat-Lauf aktiv (`ChatService.runs`); Events eines Laufs werden
+  unter dem Monitor des Laufs gepuffert und versendet, damit `watch` nichts verpasst.
+- **Scheduler planen nie doppelt.** `IngestScheduler` und `SemanticCompilationService` halten genau
+  eine geplante Aufgabe. Ein `trigger()` während eines Laufs wird vermerkt und direkt danach
+  ausgeführt.
 
 ### 5.9 Prompts
 
 Prompts liegen als Ressourcen `prompts/<name>.txt` (in `ao-agent` und `ao-semantic`), wörtlich aus
 dem Original exportiert. Kopfzeilen mit `#!` nennen die Quelle und werden beim Laden entfernt.
 Platzhalter: `{{name}}`. Laden und Füllen: `Prompts.get(name)` / `Prompts.render(name, map)`.
-Einige Prompts sind im Java-Code zusammengesetzt (`AgentPrompts`, `ChartAdvisor`,
-`NlChartService.systemPrompt`).
+Gefüllt wird in einem Durchgang: Eingesetzte Werte (Benutzerfragen, Beispielwerte) werden nicht
+erneut nach Platzhaltern durchsucht. Einige Prompts sind im Java-Code zusammengesetzt
+(`AgentPrompts`, `ChartAdvisor`, `NlChartService.systemPrompt`).
+
+Was in einen Prompt darf, ist geregelt (NFR-SEC-04): keine Beispielwerte von PII-Spalten, solange
+`ao.security.pii-samples-to-llm=false`, und keine Werte, die wie Anweisungen aussehen
+(`Nodes.instructionLike`). Die PII-Spalten holt man einmal mit `PiiDetection.piiColumnIds()`.
 
 ### 5.10 Strukturierte LLM-Ausgabe
 
@@ -725,6 +742,15 @@ Jede LLM-Antwort, die Daten liefert, ist ein **Record** mit `@LlmField`-Beschrei
 `required`), `StructuredParser` parst strikt (unbekannte Felder schlagen fehl) und ruft optional
 `LlmOutput.validate()` auf. Feldnamen und -reihenfolge stammen aus den Pydantic-Modellen des
 Originals – die Prompts verweisen darauf. **Feldnamen nie umbenennen**, ohne den Prompt anzupassen.
+
+**Antworten defensiv lesen.** „`required`“ im Schema ist eine Bitte an das Modell, keine Garantie:
+Fehlt ein Feld, steht im Record `null`. Listen deshalb vor dem Iterieren, Texte vor `strip()`
+prüfen – sonst wird aus einer schwachen Antwort eine `NullPointerException` und aus dem
+vorgesehenen Fallback ein abgebrochener Lauf.
+
+```java
+List<String> entities = m.required_entity_name() == null ? List.of() : m.required_entity_name();
+```
 
 ### 5.11 Logging
 
@@ -750,8 +776,9 @@ IngestScheduler.runOnce
      └─ doRun(spec)                              (Lock: serialisiert)
          ├─ ConnectionService.connector(spec)    → SourceDatabase
          ├─ CatalogExtractor.extract(db, filter) → Catalog (Tabellen, Spalten, FKs, Historie)
-         ├─ CatalogWriter.write                  → Diff + Upsert in einer Transaktion
-         ├─ vectors.deleteByIds(entfernte Objekte)
+         ├─ CatalogWriter.write                  → Diff + Upsert in einer Transaktion; ColumnAttributes
+         │                                         entfernter Tabellen/Spalten werden mitgelöscht
+         ├─ vectors.deleteByIds(entfernte Objekte) → data_objects_layer und semantic_layer
          ├─ writeQueryHistory                    → QueryHistoryParser (JSqlParser), sql_query, column__join
          ├─ Stage.afterCatalogWrite              → PiiDetection
          ├─ DataLayerEmbedder.embedDatabase      → Embedding in Chunks, alter Bestand erst vor dem 1. Chunk gelöscht
@@ -799,8 +826,8 @@ Details: [`ao-agent`](module/ao-agent.md), [`ao-api`](module/ao-api.md).
 POST /api/nl-chart/suggest ─▶ NlChartService.suggest
    ├─ Kandidaten-Datasets (Vektorsuche label=Dataset, sonst alle)
    ├─ Modus A: LLM → ChartSuggestion → ChartValidator (Katalog, Spalten, buildQuery-Port, Dashboard-Engine)
-   │           bis zu 2 Reparaturrunden
-   └─ Modus B (kein Dataset gewählt): AgentRunner → Zeilen → ChartAdvisor → QueryResult
+   │           bis zu 2 Reparaturrunden; danach error-Event und Ende
+   └─ Modus B (nur wenn kein Dataset gewählt wurde): AgentRunner → Zeilen → ChartAdvisor → QueryResult
 ```
 
 Details: [`ao-nl-chart`](module/ao-nl-chart.md).
@@ -861,20 +888,25 @@ Gesammelt aus allen Modulen; Details stehen jeweils im Moduldokument.
 | 3 | Intent-Validierung „fail-open“ | Liefert das LLM keine gültige Antwort, gilt das SQL nach der statischen Prüfung als gültig. | `ao-agent` |
 | 4 | `prediction: true` | Es gibt keinen Vorhersagezweig; die Frage läuft trotzdem durch den SQL-Pfad statt mit Fehler abzubrechen (FR-AGT-01). | `ao-agent` |
 | 5 | Abbruch laufender LLM-Aufrufe | Das Token bricht JDBC-Statements ab und wird zwischen Knoten geprüft; ein laufender HTTP-Aufruf zum LLM läuft bis zum Timeout weiter. | `ao-agent`, `ao-llm` |
-| 6 | T-SQL-Limit | `SqlServerSource.limit` umschließt das SQL mit `SELECT TOP n * FROM (…)`. Enthält das innere SQL ein `ORDER BY` ohne `TOP`/`OFFSET`, lehnt SQL Server das ab. | `ao-connectors` |
+| 6 | T-SQL-Limit | `SqlServerSource.limit` umschließt das SQL mit `SELECT TOP n * FROM (…)`. Enthält das innere SQL ein `ORDER BY` ohne `TOP`/`OFFSET`, lehnt SQL Server das ab. `limit()` nur um eigenes SQL ohne `ORDER BY` legen; Agent-SQL wird über `setMaxRows` begrenzt. | `ao-connectors` |
 | 7 | Credentials im Klartext | UI-Verbindungen speichern Passwörter als JSON in `catalog_database.connection` (wie das Original ohne Vault). Die API gibt sie nie zurück. | `ao-ingestion` |
 | 8 | Dynamisches SQL in `patch*` | `CatalogRepository.patchNode` und `SemanticRepository.patch` bauen `SET`-Klauseln aus Map-Schlüsseln. Aufrufer müssen die Schlüssel whitelisten (die Controller tun das). | `ao-store` |
 | 9 | Leere IN-Listen | `StoreJdbc` ersetzt leere Collections durch `["__none__"]`, damit `IN (:ids)` gültig bleibt. | `ao-store` |
 | 10 | Reconcile nur für den Data Layer | `/internal/vector/reconcile` gleicht nur `data_objects_layer` ab und läuft nicht automatisch; Neuaufbau in neue Collections mit Alias-Umschaltung (FR-VEC-06) fehlt. | `ao-api`, `ao-vector` |
 | 11 | Verbindungs-Präzedenz | Ingest nimmt konfigurierte Verbindungen zuerst, Kompilierung und Chat UI-Verbindungen zuerst. Gibt es beide, werden ggf. unterschiedliche Datenbanken ingestet und kompiliert. | `ao-ingestion`, `ao-semantic` |
-| 12 | NL-Chart-Grenzen | `conversation_id` wird nur für Analytics verwendet; Zeit- und Aufrufbudget (NFR-NLC-02) fehlt; ohne Vektortreffer sind **alle** Datasets Kandidaten, Modus B läuft nur, wenn das LLM kein Dataset wählt. | `ao-nl-chart` |
+| 12 | NL-Chart-Grenzen | `conversation_id` wird nur für Analytics verwendet; Zeit- und Aufrufbudget (NFR-NLC-02) fehlt; ohne Vektortreffer sind **alle** Datasets Kandidaten, Modus B läuft nur, wenn das LLM kein Dataset wählt. Gleichnamige Metriken mehrerer Datasets werden als `<Name> (<Tabelle>)` gespiegelt. | `ao-nl-chart` |
 | 13 | MCP über `localhost` | Ohne `ao.mcp.api-base-url` ruft der MCP-Server `http://localhost:<port><prefix>`. Bindet der Server an eine andere Adresse, muss die URL gesetzt werden. | `ao-mcp` |
 | 14 | Arbeitsverzeichnis | `DomainContext` liest `.semantic_summaries/<db>.json` und das Demo-Profil schreibt `data/` relativ zum Arbeitsverzeichnis. | `ao-semantic`, `ao-app` |
 | 15 | Persistenter H2-Store | `DATABASE_TO_LOWER=TRUE` ist für Datei-Stores verboten (Liquibase). In-Memory ist erlaubt. | `ao-store` |
+| 16 | Terms sind datenbankübergreifend | Merge-Schlüssel ist (`name`, `source`). Zwei Datenbanken mit einer Tabelle `CUSTOMERS` teilen sich den Term „Customer“. Der Reset bzw. das Löschen einer Datenbank lässt geteilte Terms deshalb stehen. | `ao-store`, `ao-semantic` |
+| 17 | Read-only ist eine Syntaxprüfung | `ReadOnlySql` erkennt schreibende Statements (auch in CTEs) und Sperren, nicht aber Funktionen mit Seiteneffekten. Der Lesebenutzer bleibt Pflicht. | `ao-connectors` |
+| 18 | Untypisierte Request-Bodies | Controller nehmen `Map<String, Object>`; nichts validiert automatisch. Jede neue Route muss Pflichtfelder, Typen und Eindeutigkeit selbst prüfen, sonst wird aus einer falschen Eingabe ein 500 der Datenbank. | `ao-api` |
+| 19 | `"null"` als Text | `String.valueOf(map.getOrDefault(key, ""))` ergibt bei vorhandenem Schlüssel mit Wert `null` den Text `"null"`. `Rows.strOr` bzw. `AppController.str/text` verwenden. | alle |
+| 20 | Re-Embedding nach dem Speichern | Routen, die erst speichern und dann neu einbetten, antworten bei einem Embedding-Fehler mit 500, obwohl die Änderung im Store steht. | `ao-api` |
 
 ---
 
-## 10. Moduldokumente
+## 10. Moduldokumente (Übersicht)
 
 | Modul | Dokument |
 |---|---|
@@ -894,4 +926,141 @@ Gesammelt aus allen Modulen; Details stehen jeweils im Moduldokument.
 | `ao-dashboard-demo` | [module/ao-dashboard-demo.md](module/ao-dashboard-demo.md) |
 
 Jedes Moduldokument hat denselben Aufbau: Zweck · Abhängigkeiten · Klassen · Beans · Abläufe ·
-Konfiguration · Erweiterungspunkte · Tests · Fallstricke · Anforderungsbezug.
+Konfiguration · Erweiterungspunkte · Code-Beispiele · Tests · Fallstricke · Anforderungsbezug.
+
+---
+
+## 11. Kochbuch
+
+Dieser Abschnitt zeigt eine Änderung **durch alle Schichten** und verweist danach auf die
+Beispiele der einzelnen Module. Alle Beispiele folgen den Konventionen aus Abschnitt 8.
+
+### 11.1 Ein Feature von der Einstellung bis zum Test
+
+Aufgabe: Terms sollen eine Prüfnotiz bekommen („reviewed“), abrufbar und setzbar über die API. Die
+maximale Länge der Notiz ist konfigurierbar.
+
+**1. Einstellung** (`ao-common`)
+
+```java
+// AoProperties.java – im Record Semantic
+public record Semantic(
+        @DefaultValue("true") boolean rankSqlByUsage,
+        @DefaultValue("6") int llmMaxInflight,
+        @DefaultValue("24") int intervalHours,
+        @DefaultValue("true") boolean schedulerEnabled,
+        @DefaultValue("500") int reviewNoteMaxLength) {}        // ao.semantic.review-note-max-length
+```
+
+**2. Schema** (`ao-store`) – ein neues Changeset, bestehende nie ändern
+
+```sql
+--changeset ao:008-term-review
+ALTER TABLE term ADD COLUMN reviewed_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE term ADD COLUMN review_note ${text};
+```
+
+**3. Repository** (`ao-store`) – SQL, das auf PostgreSQL und H2 läuft
+
+```java
+// SemanticRepository.java
+public boolean markReviewed(String termId, String note, Instant now) {
+    Map<String, Object> p = new HashMap<>();                    // HashMap: Werte dürfen null sein
+    p.put("id", termId);
+    p.put("note", note);
+    p.put("now", now);
+    return db.update("UPDATE term SET reviewed_at = :now, review_note = :note WHERE id = :id", p) == 1;
+}
+```
+
+`TERM_COLS` um `t.reviewed_at, t.review_note` ergänzen, damit die Felder in allen Term-Antworten
+erscheinen.
+
+**4. Endpunkt** (`ao-api`) – prüfen, bevor geschrieben wird
+
+```java
+// SemanticController.java
+@PutMapping("/terms/{termId}/review")
+public Map<String, Object> review(@PathVariable String termId, @RequestBody Map<String, Object> body) {
+    term(termId);                                               // 404 bei ungültiger oder unbekannter ID
+    // props: AoProperties, wie jede Abhängigkeit per Konstruktor in den Controller gereicht
+    String note = AppController.str(body.get("note"));          // "" und null → null
+    if (note != null && note.length() > props.semantic().reviewNoteMaxLength()) {
+        throw ApiException.unprocessable("note is longer than " + props.semantic().reviewNoteMaxLength() + " characters");
+    }
+    if (!semantic.markReviewed(termId, note, time.now())) {
+        throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "The change could not be stored");
+    }
+    return Map.of("data", term(termId));
+}
+```
+
+Die Route ist neu gegenüber dem Original, gehört also in die Allowlist von `OpenApiContractTest`.
+
+**5. Tests** – Repository gegen beide Stores, Endpunkt über den laufenden Host
+
+```java
+// StoreSchemaTest.java
+@ParameterizedTest
+@MethodSource("stores")
+void termsCanBeReviewed(DataSource ds) throws Exception {
+    SemanticRepository semantic = new SemanticRepository(migrate(ds));
+    Instant now = Instant.parse("2026-06-30T00:00:00Z");
+    String id = semantic.mergeTerm("Customer " + System.nanoTime(), null, List.of(), "semantic", now);
+
+    assertThat(semantic.markReviewed(id, "checked with sales", now)).isTrue();
+    assertThat(semantic.termById(id).orElseThrow()).containsEntry("review_note", "checked with sales");
+    assertThat(semantic.markReviewed("00000000-0000-0000-0000-000000000000", null, now)).isFalse();
+}
+```
+
+```java
+// in einem @SpringBootTest(webEnvironment = RANDOM_PORT) wie DemoEndToEndTest
+HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(base + "/api/terms/" + id + "/review"))
+        .header("Content-Type", "application/json")
+        .PUT(HttpRequest.BodyPublishers.ofString("{\"note\":\"ok\"}")).build(), HttpResponse.BodyHandlers.ofString());
+assertThat(r.statusCode()).isEqualTo(200);
+assertThat(r.body()).contains("\"review_note\":\"ok\"");
+```
+
+**6. Frontend** – ein Aufruf über den Client, Text in beiden Sprachdateien
+
+```ts
+await ao.put(`/terms/${id}/review`, { note: note.value })
+```
+
+**7. Dokumentation** – Route in `module/ao-api.md` (Sonderfälle), Einstellung in
+`DOKUMENTATION.md` Abschnitt 10, Changeset in `module/ao-store.md`.
+
+### 11.2 Checkliste vor dem Commit
+
+- `./gradlew build` läuft durch (`-Werror`: jede Warnung ist ein Fehler).
+- Neue Logik hat einen Test, der **ohne** LLM und ohne Docker läuft.
+- Requests: Pflichtfelder, Typen und Eindeutigkeit geprüft → 4xx statt Datenbankfehler; `skip`/`limit`
+  begrenzt.
+- LLM-Antworten: Listen und Texte auf `null` geprüft; es gibt einen Fallback.
+- Zeit über `AoTime`, IDs über `Ids.newId()`, JSON über `Json`; kein hart kodiertes `/api`.
+- SQL für den Store läuft auf PostgreSQL **und** H2; Werte aus Requests nur als benannte Parameter.
+- SQL für Quell-Datenbanken: Bezeichner über `quote`/`qualify`, Limit über `limit()`, vor dem
+  Ausführen `ReadOnlySql.violation`.
+- Prompts: keine Beispielwerte von PII-Spalten, keine anweisungsartigen Werte.
+- Frontend: `pnpm test && pnpm typecheck && pnpm --filter ao-demo typecheck`.
+
+### 11.3 Wo die übrigen Beispiele stehen
+
+| Thema | Dokument, Abschnitt „Code-Beispiele“ |
+|---|---|
+| Einstellung ergänzen, `ApiException`-Formen, abbrechbarer Lauf, `Rows`/`Json` | [`ao-common`](module/ao-common.md) |
+| Changeset, Repository-Methoden, IN-Listen, Laufzeitschalter, Repository-Test | [`ao-store`](module/ao-store.md) |
+| Vektoren schreiben, suchen, löschen; Vertragstest | [`ao-vector`](module/ao-vector.md) |
+| Strukturierter LLM-Aufruf mit Record, Embeddings, Rollen, `ScriptedLlmGateway` | [`ao-llm`](module/ao-llm.md) |
+| Konnektor öffnen, Read-only-Prüfung, dialektneutrales SQL, neue Engine | [`ao-connectors`](module/ao-connectors.md) |
+| Ingest-Stage, Verbindungen und Filter, Query-Historie, PII, Suche | [`ao-ingestion`](module/ao-ingestion.md) |
+| Kompilierung steuern, Hooks, LLM-Schritte testen, Embedding-Zeilen | [`ao-semantic`](module/ao-semantic.md) |
+| Agent aufrufen, Knoten ergänzen, statische SQL-Prüfung, Join-Pfade | [`ao-agent`](module/ao-agent.md) |
+| Neuer Endpunkt, `curl`-Aufrufe mit Fehlerformen, SSE senden | [`ao-api`](module/ao-api.md) |
+| Neues MCP-Tool, Tools direkt und über das Protokoll aufrufen | [`ao-mcp`](module/ao-mcp.md) |
+| NL-Chart-Stream, Validierung, `QueryContextBuilder`, `SqlResults`, Sync | [`ao-nl-chart`](module/ao-nl-chart.md) |
+| Minimaler Host, Bean ersetzen, Schema selbst migrieren | [`ao-spring-boot-starter`](module/ao-spring-boot-starter.md) |
+| Seite mit Fehleranzeige, API-Client, Stream lesen, Ergebnisse rendern | [`frontend/quasar-ontology`](frontend/quasar-ontology.md) |
+| NL-Plugin einbinden, Client ohne Komponente | [`frontend/quasar-dashboard-nl`](frontend/quasar-dashboard-nl.md) |

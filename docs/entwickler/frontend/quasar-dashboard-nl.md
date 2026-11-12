@@ -88,9 +88,10 @@ Vorschau
                      SQL anzeigbar; ohne results (leeres Ergebnis) keine Vorschau
 Anzeige: explanation, assumptions, warnings, Varianten-Chips aus alternatives
 Folgefrage → ask(followUp, {...suggestion.params, viz_type})        (Diff statt Neugenerierung)
-Variante   → ask("<frage> — als <viz_type>", {...params, viz_type})
+Variante   → ask(t('qdnl.asVariant', {question, vizType}), {...params, viz_type})   ("… — as bar" / "… — als bar")
 Speichern  → nur mode "semantic": saveChart({slice_name, description, viz_type, datasource_id,
              datasource_type: "table", params, query_context, dashboards?}) → Event saved
+             lehnt die Dashboard-API ab (z. B. 422), erscheint die Meldung im Fehlerbanner
 Builder    → Event open-builder
 Verwerfen  → suggestion = null
 ```
@@ -133,20 +134,59 @@ zusätzlich, dass beide Sprachen dieselben Schlüssel haben.
 `test/sse.test.ts`: `parseSse` über Chunk-Grenzen, gleiche i18n-Schlüssel in DE und EN.
 
 ```bash
-pnpm --filter @jentsch/quasar-dashboard-nl test
+pnpm --filter @jentsch/quasar-dashboard-nl test    # oder im Wurzelverzeichnis: pnpm test (beide Bibliotheken)
 ```
 
-Das Root-Skript `pnpm test` führt diese Tests **nicht** aus.
+## Code-Beispiele
+
+### Einbinden
+
+```ts
+// boot/plugins.ts – nach Pinia, vue-i18n und createQuasarDashboard
+app.use(createQuasarDashboardNl({
+  baseUrl: import.meta.env.VITE_API_BASE_URL ?? '',
+  apiPrefix: '/api/nl-chart',            // = ao.nl-chart.api-prefix
+  dashboardApiPrefix: '/api/v1',         // = quasar-dashboard.api-prefix (zum Speichern)
+}))
+```
+
+```vue
+<QdNlChartPrompt
+  :dataset-id="datasetId"
+  :dashboard-id="dashboardId"
+  :initial-params="currentParams"
+  @saved="(chart) => Notify.create({ type: 'positive', message: t('qdnl.saved') })"
+  @open-builder="({ datasetId, vizType, params }) => openInBuilder({ datasetId, vizType, params })"
+/>
+```
+
+### Den Client ohne Komponente verwenden
+
+```ts
+const nl = createNlClient({ apiPrefix: '/api/nl-chart' })
+let suggestion: Record<string, unknown> | null = null
+await nl.suggest({ question: 'Revenue by region last year', dataset_id: 1 }, (e) => {
+  if (e.type === 'chart_suggestion') suggestion = e
+  else if (e.type === 'error') throw new Error(String(e.message))
+})
+if (suggestion?.mode === 'semantic') {
+  await nl.saveChart({
+    slice_name: suggestion.slice_name, viz_type: suggestion.viz_type,
+    datasource_id: suggestion.dataset_id, datasource_type: 'table',
+    params: suggestion.params, query_context: suggestion.query_context ?? null,
+  })
+}
+```
+
+Nach einem `error`-Event folgt **kein** `chart_suggestion` mehr: Scheitert die Validierung im
+Backend endgültig, endet der Stream mit `error` und `[DONE]`.
 
 ## Fallstricke
 
 - **Kein `plugin.validate()`:** Die Vorschau ergänzt nur die Plugin-Defaults; die clientseitige
   Validierung aus FR-NLC-13 und das Blockieren des Speicherns bei Fehlern fehlen.
-- **Speicherfehler** (z. B. 422 der Dashboard-API) werden in `save()` nicht abgefangen und nicht
-  angezeigt.
-- **Varianten** hängen den deutschen Text „— als <viz_type>“ an die Frage, auch bei englischer UI.
 - **Abbrechen** ist nicht vorgesehen: `suggest` akzeptiert ein `AbortSignal`, die Komponente übergibt
-  aber keins. Nach `[DONE]` bricht die Schleife ab, ohne den Reader zu schließen.
+  aber keins. (Nach `[DONE]` wird der Reader geschlossen und die Verbindung freigegeben.)
 - **Mock-Modus fehlt:** Es gibt keine MSW-Handler für `/api/nl-chart/**` (FR-NLC-20); die Komponente
   braucht ein laufendes `ao-dashboard-demo`-Backend.
 - `datasource` wird als `"<id>__table"` gebildet – das Format muss zu quasar-dashboard passen.

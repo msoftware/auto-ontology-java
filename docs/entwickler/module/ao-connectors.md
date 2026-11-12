@@ -30,7 +30,7 @@ in `ao-ingestion`.
 | `Connectors` | Fabrik: aus JDBC-URL (eigener Hikari-Pool) oder `DataSource`-Bean; Parser für `CONNECTION_STRINGS` |
 | `ConnectionSpec` | Verbindungsbeschreibung (URL, Credentials, Bean-Name, Scoping) mit maskiertem `toString()` |
 | `TableFilter` | Schema-Allowlist und Allow-/Deny-Regex |
-| `ReadOnlySql` | Prüfung auf ein einzelnes `SELECT`/`WITH` |
+| `ReadOnlySql` | Prüfung auf ein einzelnes, rein lesendes `SELECT`/`WITH` (rekursiv über CTEs, Mengenoperationen, Unterabfragen im `FROM`) |
 | `TabularResult` | Spaltennamen (eindeutig gemacht), JDBC-Typen, Zeilen, `truncated` |
 | `DbErrors` | Klassifikation in `TIMEOUT`, `CONNECTION`, `SYNTAX`, `PERMISSION`, `OTHER`; `SourceQueryException` |
 
@@ -105,6 +105,21 @@ kein reserviertes Wort ist; sonst `"…"`. SQL Server quotet immer mit `[…]`. 
 über `DatabaseMetaData.storesLowerCaseIdentifiers()` ermittelt (Oracle fest groß, PostgreSQL fest
 klein).
 
+Die Liste der reservierten Wörter (`JdbcSourceDatabase.RESERVED`) umfasst die gängigen
+SQL-Schlüsselwörter (`ORDER`, `GROUP`, `USER`, `END`, `DESC`, `COMMENT`, `LEVEL`, `SIZE`, `NUMBER` …).
+Sie ist bewusst großzügig: Einen Bezeichner zu quoten, der schon in der Faltung der Datenbank
+geschrieben ist, ändert seine Bedeutung nie – ein nicht gequotetes Schlüsselwort dagegen bricht das
+Statement.
+
+```java
+H2Source h2 = …;                    // Standard-H2: faltet nach GROSS
+h2.quote("CUSTOMERS")               // CUSTOMERS            – passt zur Faltung, kein Schlüsselwort
+h2.quote("ORDER")                   // "ORDER"              – Schlüsselwort
+h2.quote("customerName")            // "customerName"       – gemischte Schreibweise bleibt nur gequotet erhalten
+h2.qualify("SALES", "ORDER LINES")  // SALES."ORDER LINES"
+sqlServer.quote("Order")            // [Order]
+```
+
 ### Limit je Dialekt
 
 | Dialekt | `sampleQuery` | `limit(sql, n)` |
@@ -126,11 +141,27 @@ klein).
 
 ### Read-only-Prüfung
 
-`ReadOnlySql.violation(sql)` liefert `null`, wenn genau ein Statement vorliegt, das ein `SELECT`
-(inkl. `WITH`) ist und weder `SELECT … INTO` noch `FOR UPDATE` enthält; sonst den Grund.
-Abschließende Semikolons werden vorher entfernt. Das ist die Schutzgrenze für **alle** vom Agenten
-ausgeführten Statements; zusätzlich laufen eigene Pools mit `readOnly = true`. Quell-DBs trotzdem
-immer mit einem reinen Lesebenutzer anbinden.
+`ReadOnlySql.violation(sql)` liefert `null`, wenn genau ein Statement vorliegt, das **rein lesend**
+ist; sonst den Grund als Text. Abschließende Semikolons werden vorher entfernt. Das ist die
+Schutzgrenze für **alle** vom Agenten ausgeführten Statements; zusätzlich laufen eigene Pools mit
+`readOnly = true`. Quell-DBs trotzdem immer mit einem reinen Lesebenutzer anbinden.
+
+Die Prüfung läuft **rekursiv** über das ganze Statement. Der Typ des obersten Statements allein
+beweist nichts: JSqlParser meldet auch ein schreibendes CTE als gewöhnliches `Select`.
+
+| Statement | Ergebnis von `violation` |
+|---|---|
+| `SELECT a FROM t` · `WITH x AS (SELECT …) SELECT …` · `… UNION ALL …` | `null` (erlaubt) |
+| `WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d` (ebenso `INSERT`/`UPDATE`) | `data-modifying statements in WITH are not allowed` |
+| `SELECT … FOR UPDATE` – auch in Klammern, in einem CTE oder in einer Unterabfrage im `FROM` | `SELECT ... FOR UPDATE is not allowed` |
+| `SELECT a INTO copy FROM t` | `SELECT INTO is not allowed` |
+| `SELECT 1; DROP TABLE t` | `only a single statement is allowed` |
+| `DELETE FROM t`, `CREATE …`, `CALL …` | `only SELECT/WITH statements are allowed` |
+| nicht parsbar | `SQL could not be parsed: …` |
+
+Geprüft werden CTEs, Mengenoperationen (`UNION` …), geklammerte Selects und abgeleitete Tabellen
+in `FROM`/`JOIN`. **Nicht** erkennbar sind Funktionen mit Seiteneffekten
+(`SELECT pg_terminate_backend(…)`, `nextval(…)`): Dagegen hilft nur der Lesebenutzer.
 
 ### Tabellenfilter
 
@@ -151,10 +182,110 @@ Regex trifft nicht, Allow-Regex trifft (leer = alle). Abgleich per `find()` auf 
 4. Test von `ConnectorContract` ableiten (Schema `shop` mit `customers`, `orders`, `v_orders`);
    Docker-basiert als `*IT` mit `@Tag("integration")`.
 
+## Code-Beispiele
+
+### Einen Konnektor öffnen und abfragen
+
+```java
+ConnectionSpec spec = new ConnectionSpec("sales", "jdbc:postgresql://db:5432/sales", "ao_reader", secret,
+        null,                                   // datasourceBean
+        List.of("public"),                      // Schema-Allowlist (leer = alle)
+        null, "^(tmp_|bak_)");                  // Allow-/Deny-Regex auf dem Tabellennamen
+
+try (SourceDatabase db = Connectors.open(spec)) {            // eigener Hikari-Pool, readOnly = true
+    TabularResult r = db.execute(
+            "SELECT region, SUM(amount) AS revenue FROM public.orders WHERE order_date >= ? GROUP BY region",
+            List.of(java.sql.Date.valueOf("2025-01-01")),    // Parameter als ? – nie in den Text bauen
+            30,                                               // Timeout in Sekunden
+            1000);                                            // Zeilenobergrenze
+    r.columns();        // [region, revenue]        – eindeutig gemacht (name, name_2, …)
+    r.jdbcTypes();      // [12, 2]                  – java.sql.Types
+    r.asMaps();         // [{region=North, revenue=1234.5}, …]
+    r.truncated();      // true, wenn es mehr als 1000 Zeilen gab
+} catch (DbErrors.SourceQueryException e) {
+    log.warn("{}: {}", e.kind(), e.getMessage());             // TIMEOUT | CONNECTION | SYNTAX | PERMISSION | OTHER
+}
+```
+
+Im laufenden System öffnet man Konnektoren nicht selbst, sondern holt sie über
+`ConnectionService.connector(spec)` (gecacht) bzw. `answeringConnectors()`.
+
+### Vor dem Ausführen prüfen
+
+```java
+String violation = ReadOnlySql.violation(sql);
+if (violation != null) {
+    throw ApiException.unprocessable(violation);              // 422 mit dem Grund
+}
+TabularResult r = db.execute(ReadOnlySql.stripTrailingSemicolons(sql), List.of(), timeout, maxRows);
+```
+
+### Eigenes SQL dialektneutral bauen
+
+```java
+// Bezeichner immer über quote/qualify, Zeilenbegrenzung immer über limit – nie " LIMIT n" anhängen
+String sql = db.limit("SELECT DISTINCT " + db.quote(column) + " FROM " + db.qualify(schema, table)
+        + " WHERE " + db.quote(column) + " IS NOT NULL", 25);
+// PostgreSQL/H2: SELECT DISTINCT status FROM sales.orders WHERE status IS NOT NULL LIMIT 25
+// Oracle:        SELECT * FROM (SELECT DISTINCT STATUS FROM SALES.ORDERS WHERE …) FETCH FIRST 25 ROWS ONLY
+// SQL Server:    SELECT TOP 25 * FROM (SELECT DISTINCT [status] FROM [sales].[orders] WHERE …) AS ao_limited
+```
+
+`limit()` ist für **selbst gebautes** SQL ohne `ORDER BY` gedacht (Stichproben, DISTINCT-Proben).
+SQL des Agenten wird nie umschlossen: Dort begrenzt `execute(…, maxRows)` über
+`Statement.setMaxRows`.
+
+### Eine neue Engine
+
+```java
+/** MySQL: Backtick-Quoting, LIMIT, Schema = Datenbank. */
+public class MySqlSource extends JdbcSourceDatabase {
+    public MySqlSource(String name, DataSource ds, AutoCloseable owned) {
+        super(name, ds, owned);
+    }
+
+    @Override
+    protected Set<String> systemSchemas() {
+        return Set.of("INFORMATION_SCHEMA", "MYSQL", "PERFORMANCE_SCHEMA", "SYS");
+    }
+
+    @Override
+    public String dialect() {
+        return "mysql";
+    }
+
+    @Override
+    public String quote(String identifier) {
+        return "`" + identifier.replace("`", "``") + "`";
+    }
+
+    @Override
+    public List<Map<String, Object>> getQueries(int hours) {
+        return List.of();                       // keine Historie: die SQL Attributes aus Abfragen entfallen
+    }
+}
+```
+
+Dazu in `Connectors`: `dialectOfUrl` (`jdbc:mysql:` → `"mysql"`), `wrap` (Produktname) und `create`
+(`case "mysql" -> new MySqlSource(…)`), der Treiber in `libs.versions.toml`, und ein Test:
+
+```java
+class MySqlSourceIT extends ConnectorContract {             // @Tag("integration"), Testcontainers
+    @Override
+    protected SourceDatabase source() { return new MySqlSource("shop", dataSource, null); }
+
+    @Override
+    protected String expectedDialect() { return "mysql"; }
+}
+```
+
 ## Tests
 
 `ConnectorContract` (abstrakt) prüft Tabellen und Typen, Spalten mit Boolean-`is_nullable` und
 Ordinalposition, PKs, FKs, Views, `sampleQuery` und die Read-only-Ausführung.
+
+`ReadOnlySqlTest` prüft die Read-only-Regel (erlaubte Abfragen, schreibende CTEs, `FOR UPDATE` auf
+jeder Ebene, `SELECT INTO`, mehrere Statements) und `Connectors.nameFromUrl` für alle Engines.
 
 | Test | Engine | Lauf |
 |---|---|---|
@@ -167,8 +298,11 @@ Ordinalposition, PKs, FKs, Views, `sampleQuery` und die Read-only-Ausführung.
 ## Fallstricke
 
 - **T-SQL `limit`:** `SELECT TOP n * FROM (… ORDER BY …) AS ao_limited` ist in SQL Server ungültig,
-  wenn das innere SQL `ORDER BY` ohne `TOP`/`OFFSET` enthält. Betroffen ist jede Stelle, die
-  `limit()` um Agent-SQL legt.
+  wenn das innere SQL `ORDER BY` ohne `TOP`/`OFFSET` enthält. `limit()` deshalb nur um eigenes SQL
+  ohne `ORDER BY` legen (so wird es heute überall verwendet); Agent-SQL wird über `setMaxRows`
+  begrenzt.
+- **Read-only ist eine Syntaxprüfung.** Sie erkennt schreibende Statements und Sperren, nicht aber
+  Funktionen mit Seiteneffekten. H2 setzt `readOnly` am Pool zudem nicht durch.
 - `wrap` auf einer `DataSource` eines nicht unterstützten Produkts wirft
   `IllegalArgumentException("Unsupported database product …")`.
 - Bei `wrap` gibt es keinen `readOnly`-Pool; die Read-only-Prüfung des Agenten ist dann die einzige

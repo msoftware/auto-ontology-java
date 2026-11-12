@@ -108,9 +108,33 @@ int n = db.update("UPDATE term SET name = :n WHERE id = :id", Map.of("n", name, 
 
 - `null`: löscht alle SqlAttributes, ColumnAttributes, Terms, Custom Analyses und PQL Analyses und
   setzt `is_junction_table` überall zurück.
-- eine Datenbank: löscht Semantic FKs und ColumnAttributes ihrer Tabellen, SqlAttributes und Terms
-  dieser Tabellen und ihre Custom Analyses. **PQL Analyses bleiben** (FR-SEM-08).
-- Rückgabe: die gelöschten Term-IDs (für den Aufrufer, der die Embeddings entfernt).
+- eine Datenbank: löscht Semantic FKs und ColumnAttributes ihrer Tabellen, die Zuordnungen
+  `table__term` dieser Tabellen, ihre Custom Analyses und setzt `is_junction_table` ihrer Tabellen
+  zurück. **PQL Analyses bleiben** (FR-SEM-08).
+- **Geteilte Terms bleiben:** Terms werden über (`name`, `source`) zusammengeführt. Ein Term
+  „Customer“ kann deshalb Tabellen in zwei Datenbanken beschreiben. Gelöscht (samt seiner
+  SqlAttributes) wird ein Term nur, wenn er **ausschließlich** an Tabellen der zurückgesetzten
+  Datenbank hängt; sonst verliert er nur die Zuordnungen zu dieser Datenbank.
+- Rückgabe: die tatsächlich gelöschten Term-IDs.
+
+```java
+// Datenbank A und B haben je eine Tabelle CUSTOMERS, beide am Term "Customer"; A zusätzlich INVOICES/"Invoice"
+List<String> deleted = semantic.deleteSemanticLayer(dbA);
+// deleted == ["<id von Invoice>"];  "Customer" existiert weiter und zeigt nur noch auf B.CUSTOMERS
+```
+
+### ColumnAttributes entfernter Katalogobjekte
+
+`column_attribute.table_id` hat keinen Fremdschlüssel. Verschwindet eine Tabelle oder Spalte aus der
+Quelle, löscht die Kaskade zwar `column__has_attribute`, das Attribut selbst bliebe aber als Waise
+zurück (mit Embedding im `semantic_layer`, das der Agent weiter als „wichtige Spalte“ fände). Dafür
+gibt es zwei Methoden, die `CatalogWriter` vor dem Löschen der Katalogzeilen aufruft:
+
+```java
+List<String> ids = semantic.attributeIdsOf(removedTableIds, removedColumnIds);  // über table_id bzw. HAS_ATTRIBUTE
+semantic.deleteAttributes(ids);                                                 // Kanten und Tags gehen per Kaskade mit
+vectors.deleteByIds(VectorStore.SEMANTIC_LAYER, ids);                           // macht der IngestService
+```
 
 ### Laufzeiteinstellungen
 
@@ -143,12 +167,104 @@ seine Changelog-Tabelle in Großschrift und würde beim zweiten Start „table a
 - **Neuer Laufzeitschalter:** Konstante und Getter in `RuntimeSettings`, Route in `AppController`.
 - **Repository ersetzen:** eigene Bean desselben Typs (z. B. für einen anderen Store-Dialekt).
 
+## Code-Beispiele
+
+### Eine neue Spalte samt Repository-Methode
+
+```sql
+-- db/changelog/ao/001-schema.sql, ans Ende. Bestehende Changesets nie ändern (Checksummen).
+--changeset ao:008-term-review
+ALTER TABLE term ADD COLUMN reviewed_at TIMESTAMP WITH TIME ZONE;
+ALTER TABLE term ADD COLUMN review_note ${text};
+```
+
+```java
+// SemanticRepository.java
+/** Marks a Term as reviewed; returns false when the id is unknown. */
+public boolean markReviewed(String termId, String note, Instant now) {
+    Map<String, Object> p = new HashMap<>();        // HashMap: note darf null sein, Map.of würde werfen
+    p.put("id", termId);
+    p.put("note", note);
+    p.put("now", now);                              // Instant → Timestamp macht StoreJdbc
+    return db.update("UPDATE term SET reviewed_at = :now, review_note = :note WHERE id = :id", p) == 1;
+}
+
+public List<Map<String, Object>> unreviewedTerms(int limit) {
+    // Standard-SQL, das auf PostgreSQL und H2 läuft: FETCH FIRST statt LIMIT
+    return db.list("SELECT id, name FROM term WHERE reviewed_at IS NULL ORDER BY LOWER(name)"
+            + " FETCH FIRST " + limit + " ROWS ONLY");
+}
+```
+
+`limit` ist hier ein `int` aus dem eigenen Code. Werte aus Requests gehören **immer** in benannte
+Parameter; für `OFFSET`/`FETCH` vorher mit `Math.max(0, …)` begrenzen, sonst wird aus `?skip=-1`
+ein SQL-Fehler und damit ein 500.
+
+### IN-Listen und optionale Filter
+
+```java
+public List<Map<String, Object>> termsByIds(Collection<String> ids) {
+    if (ids.isEmpty()) {
+        return List.of();                           // spart die Abfrage; StoreJdbc würde "__none__" einsetzen
+    }
+    return db.list("SELECT * FROM term WHERE id IN (:ids)", Map.of("ids", ids));
+}
+
+Map<String, Object> p = new HashMap<>();
+String where = "";
+if (search != null && !search.isBlank()) {
+    where = " WHERE LOWER(name) LIKE :q";
+    p.put("q", "%" + search.toLowerCase(Locale.ROOT) + "%");
+}
+List<Map<String, Object>> rows = db.list("SELECT id, name FROM term" + where, p);
+```
+
+### Einen Laufzeitschalter ergänzen
+
+```java
+// RuntimeSettings.java
+public static final String VALUE_REPAIR = "value_repair_enabled";
+
+public boolean valueRepairEnabled() {
+    return flag(VALUE_REPAIR, true);                // Default, wenn kein Eintrag existiert
+}
+```
+
+```java
+// AppController.java – Route und Schlüssel in beiden @*Mapping-Listen und den switch-Blöcken ergänzen
+case "value-repair" -> Map.of("enabled", settings.valueRepairEnabled());
+// ...
+case "value-repair" -> RuntimeSettings.VALUE_REPAIR;
+```
+
+```bash
+curl -X PUT localhost:8080/api/configurations/value-repair -H 'Content-Type: application/json' -d '{"enabled": false}'
+```
+
+### Ein Repository ohne Spring testen
+
+```java
+JdbcDataSource ds = new JdbcDataSource();
+ds.setURL("jdbc:h2:mem:t" + System.nanoTime() + ";MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1");
+SpringLiquibase lb = new AoSpringLiquibase();       // das echte Schema, dieselben Changesets wie im Betrieb
+lb.setDataSource(ds);
+lb.setResourceLoader(new DefaultResourceLoader());
+lb.afterPropertiesSet();
+StoreJdbc db = new StoreJdbc(JdbcClient.create(ds));
+SemanticRepository semantic = new SemanticRepository(db);
+```
+
+Für Tests, die auf beiden Stores laufen sollen, das Muster aus `StoreSchemaTest` übernehmen
+(`@ParameterizedTest` + `@MethodSource("stores")` mit H2 und eingebettetem PostgreSQL).
+
 ## Tests
 
 `StoreSchemaTest` (parametrisiert über H2 und eingebettetes PostgreSQL):
 
 - `migrationIsRepeatable` – zweiter Liquibase-Lauf ändert nichts,
 - `catalogAndSemanticRoundTrip` – Katalog, Terms, Attribute schreiben und lesen,
+- `resetOfOneDatabaseKeepsSharedTerms` – der Reset einer Datenbank löscht nur ihre eigenen Terms,
+  räumt ihre ColumnAttributes ab und setzt `is_junction_table` zurück,
 - `appTablesAndSettings` – App-Tabellen und `RuntimeSettings`-Defaults.
 
 ## Fallstricke

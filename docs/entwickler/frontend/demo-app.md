@@ -98,7 +98,8 @@ Wegen `connect-src 'self'` muss das Backend über denselben Origin erreichbar se
 
 - Die Demo-Fragen (`/api/demo/questions`) gibt es nur im Backend-Profil `demo`; sonst bleibt die
   Vorschlagsliste leer (der Fehler wird verschluckt).
-- `AskPage` parst `?params=` ohne Fehlerbehandlung; ungültiges JSON in der URL bricht die Seite.
+- `AskPage` liest `?params=` als JSON-Objekt; ungültiges JSON oder ein anderer JSON-Typ wird
+  ignoriert (die Seite startet dann ohne Vorbelegung).
 - Die Seitenhöhe ist fest als `calc(100vh - 50px)` gesetzt (Header-Höhe).
 - `@jentsch/mock-backend` ist installiert, aber es gibt keinen `VITE_MOCK_API`-Modus.
 - Die Menüeinträge sind in `MainLayout.vue` hart verdrahtet; neue Bibliotheksseiten müssen dort

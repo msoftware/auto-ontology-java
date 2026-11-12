@@ -83,5 +83,5 @@ docker compose up --build                             # PostgreSQL + Qdrant + ba
 ```bash
 cd backend && ./gradlew test             # H2 + embedded PostgreSQL, no Docker (incl. E2E, OpenAPI contract, MCP, NL charts)
 cd backend && ./gradlew integrationTest  # Testcontainers: Qdrant, Oracle Free, SQL Server
-cd frontend && pnpm test && pnpm --filter ao-demo typecheck && pnpm build
+cd frontend && pnpm test && pnpm typecheck && pnpm --filter ao-demo typecheck && pnpm build
 ```

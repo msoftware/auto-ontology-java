@@ -58,6 +58,9 @@ Originals übernommen; sie steuern, wie fremde Agenten die Tools einsetzen. Nich
   ein zufälliger Testport, und das Präfix ist nie hart kodiert.
 - **HTTP:** Connect-Timeout 10 s, Request-Timeout 60 s, für `ask_question` 900 s. Jeder Aufruf
   sendet `x-auto-ontology-source: mcp`, damit MCP-Fragen in den Analytics getrennt erscheinen.
+- **`ask_question` liest einen SSE-Stream.** Der Zeilen-Stream der HTTP-Antwort wird in einem
+  `try`-with-resources geschlossen – auch wenn die Schleife bei `[DONE]` oder mit einem Fehler
+  endet. Sonst bliebe die Verbindung zum eigenen Backend offen.
 - **Ergebnis:** Jedes Tool-Ergebnis wird als JSON-Text (`addTextContent`) zurückgegeben. Eine
   `RuntimeException` (z. B. Backend nicht erreichbar, HTTP-Fehler) wird zu einem Ergebnis mit
   `isError = true` und der Fehlermeldung.
@@ -87,6 +90,50 @@ Client-Konfiguration (Beispiel):
 3. Nur lesende Endpunkte verwenden – „MCP ist read-only“ ist die wichtigste Schutzgrenze ohne
    Anmeldung.
 4. `McpServerTest` erweitern.
+
+## Code-Beispiele
+
+### Ein neues Tool
+
+```java
+// McpTools.TOOLS – Name, Beschreibung (steuert, wann ein Agent das Tool wählt) und Eingabeschema
+new Tool("list_custom_analyses", "List the reviewed custom analyses (named SQL queries) of this deployment. "
+        + "Use it to find an existing, trusted query before asking a new question.",
+        schema(Map.of("query", "Optional search text"), List.of())),
+```
+
+```java
+// McpTools.call – auf einen LESENDEN API-Aufruf abbilden
+case "list_custom_analyses" -> get("/custom-analyses?limit=50&query=" + enc(a.getOrDefault("query", "")));
+```
+
+Werte aus den Tool-Argumenten immer mit `enc(...)` in die URL setzen. `POST`-Tools sind nur für
+Endpunkte erlaubt, die nichts verändern (`/question-entity-coverage`, `/chat/completions`).
+
+### Die Tools direkt aufrufen (Test oder Skript)
+
+```java
+McpTools tools = new McpTools("http://localhost:8080/api");      // Basis-URL inklusive Präfix
+Object terms = tools.call("search_terms", Map.of("query", "customer"));
+Map<String, Object> ready = (Map<String, Object>) tools.call("check_readiness", Map.of());
+// {ready=false, catalog_ingested=true, has_connection=true, semantic_layer_compiled=false,
+//  blockers=[The semantic layer has not been compiled: enable the semantic compilation.], …}
+
+Map<String, Object> answer = (Map<String, Object>) tools.call("ask_question",
+        Map.of("question", "How many wholesale customers are there?"));
+// {answer=…, sql=SELECT COUNT(*) …, rows=[{COUNT=42}], row_count=1, truncated=false, steps=[…]}
+```
+
+### Über das Protokoll
+
+```bash
+# Streamable HTTP: initialisieren, dann Tools listen bzw. aufrufen (Session-ID aus dem Header der ersten Antwort)
+curl -si -X POST localhost:8080/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+curl -s -X POST localhost:8080/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+     -H 'Mcp-Session-Id: <id>' \
+     -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_terms","arguments":{"query":"customer"}}}'
+```
 
 ## Tests
 

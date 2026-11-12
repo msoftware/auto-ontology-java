@@ -30,14 +30,14 @@ Alle anderen Module hängen (transitiv) von `ao-common` ab.
 | `CancellationToken` | Abbruch-Flag mit Hooks und Thread-Bindung |
 | `Ids` | `newId()` (UUID-String), `isUuid(value)` |
 | `Json` | statischer, toleranter `JsonMapper` (unbekannte Felder werden ignoriert) für JSON in Textspalten |
-| `Rows` | normalisiert JDBC-Zeilen (Schlüssel klein, `Clob` → String, `Timestamp` → ISO-Instant) |
+| `Rows` | normalisiert JDBC-Zeilen (Schlüssel klein, `Clob` → String, `Timestamp` → ISO-Instant); Lesehilfen `str`, `strOr`, `bool` |
 
 ## Beans
 
 | Bean | Typ | Bedingung |
 |---|---|---|
 | `aoCurrentUser` | `CurrentUser` | `@ConditionalOnMissingBean` |
-| `aoTime` | `AoTime` | `@ConditionalOnMissingBean(name = "aoClock")` |
+| `aoTime` | `AoTime` | `@ConditionalOnMissingBean` (eine eigene `AoTime`-Bean des Hosts ersetzt sie) |
 | (Import) | `ApiExceptionHandler` | immer |
 
 ## Implementierungsdetails
@@ -89,7 +89,8 @@ dass Injektionen mehrdeutig werden.
 
 Bean-Validation, unlesbare Bodies, fehlende Parameter und Typfehler werden zu
 `422 {"detail": [{"loc": [...], "msg": ..., "type": "value_error"}]}`. 5xx-Antworten werden als
-WARN geloggt.
+WARN geloggt. Eine `ApiException` ohne Meldung (`detail == null`) wird mit leerem Text gerendert –
+sie darf den Fehler nicht selbst in einen 500 verwandeln.
 
 ### Abbruch (`CancellationToken`)
 
@@ -115,6 +116,10 @@ token.cancel();                                           // aus einem anderen T
   dem Rohtext, `readList` eine leere Liste – je nachdem, was der Aufrufer bei Altdaten erwartet.
 - `Rows.bool` akzeptiert `Boolean` und Strings wie `"true"` (für Stores, die Booleans anders
   liefern).
+- `Rows.strOr(row, key, def)` liefert den Text eines Feldes oder den Default. **Nicht**
+  `String.valueOf(row.getOrDefault(key, ""))` schreiben: `getOrDefault` gibt bei vorhandenem
+  Schlüssel mit Wert `null` eben `null` zurück, und daraus wird der Text `"null"` (so landeten leere
+  Beschreibungen als „null“ in API-Antworten, Exporten und Prompts).
 
 ## Erweiterungspunkte
 
@@ -123,7 +128,98 @@ token.cancel();                                           // aus einem anderen T
 - **Neue Einstellung:** Komponente im passenden Record von `AoProperties` mit `@DefaultValue`
   ergänzen; bei einer Umgebungsvariable des Originals zusätzlich in `ao-defaults.properties`
   mappen.
-- **Eigene Uhr:** `ao.clock.fixed-now` oder eine `Clock`-Bean im Host.
+- **Eigene Uhr:** `ao.clock.fixed-now`, eine `Clock`-Bean im Host oder – für volle Kontrolle – eine
+  eigene `AoTime`-Bean.
+
+## Code-Beispiele
+
+### Eine neue Einstellung `ao.*`
+
+```java
+// AoProperties.java – Komponente im passenden Record ergänzen, immer mit @DefaultValue
+public record Agent(
+        @DefaultValue("false") boolean validateSqlValues,
+        // ...
+        @DefaultValue("1000") int maxResultRows,
+        @DefaultValue("3") int maxJoinDepth) {}          // neu: ao.agent.max-join-depth
+```
+
+```properties
+# ao-defaults.properties – nur wenn es eine Umgebungsvariable des Originals dafür gibt
+ao.agent.max-join-depth=${MAX_JOIN_DEPTH:3}
+```
+
+```java
+// Verwendung: AoProperties wird überall per Konstruktor gereicht
+int depth = props.agent().maxJoinDepth();
+```
+
+Relaxed Binding macht daraus automatisch `AO_AGENT_MAX_JOIN_DEPTH`. Tests bauen den Record ohne
+Spring-Kontext:
+
+```java
+AoProperties props = new Binder(new MapConfigurationPropertySource(
+        Map.of("ao.vector.dimensions", "64", "ao.agent.max-join-depth", "2")))
+        .bindOrCreate("ao", AoProperties.class);
+```
+
+### Fehler aus einem Controller melden
+
+```java
+@GetMapping("/terms/{id}")
+public Map<String, Object> term(@PathVariable String id) {
+    if (!Ids.isUuid(id)) {                                  // ungültige IDs sind 404, nie 500 (FR-DB-02)
+        throw ApiException.notFound("Term not found");      // → 404 {"detail": "Term not found"}
+    }
+    return semantic.termById(id).orElseThrow(() -> ApiException.notFound("Term not found"));
+}
+
+throw ApiException.unprocessable("name must not be empty");            // 422 {"detail": ...}
+throw ApiException.conflict("A term with this name already exists");   // 409 {"detail": ...}
+throw ApiException.error(HttpStatus.BAD_REQUEST, "title is required"); // 400 {"error": ...}  (Next.js-Routen)
+throw ApiException.plain(HttpStatus.NOT_FOUND, "Conversation not found"); // 404, text/plain
+throw ApiException.badGateway("The language model did not answer");    // 502: der Fehler liegt beim Modell
+```
+
+Faustregel: Alles, was der Aufrufer durch eine andere Eingabe beheben kann, ist 4xx und wird **vor**
+dem Schreiben geprüft. Eine verletzte `NOT NULL`- oder `UNIQUE`-Bedingung, die erst die Datenbank
+bemerkt, kommt als 500 beim Client an.
+
+### Einen abbrechbaren Lauf bauen
+
+```java
+CancellationToken token = new CancellationToken();
+Thread.ofVirtual().start(() -> {
+    try (CancellationToken.Scope scope = token.bind()) {    // ab hier sehen Konnektoren das Token
+        for (String table : tables) {
+            token.check();                                  // zwischen den Schritten: wirft CancelledException
+            connector.execute("SELECT COUNT(*) FROM " + table, List.of(), 30, 1);   // laufendes Statement
+        }                                                   // wird bei cancel() per Statement.cancel() beendet
+    } catch (CancellationToken.CancelledException e) {
+        log.info("cancelled");
+    }
+});
+token.cancel();                                             // z. B. aus dem HTTP-Thread von /chat/cancel
+```
+
+Eigene Ressourcen hängt man mit `onCancel` ein:
+
+```java
+try (CancellationToken.Scope hook = token.onCancel(httpCall::abort)) {
+    httpCall.execute();
+}                                                           // Scope schließt → Hook abgemeldet
+```
+
+### Zeilen und JSON lesen
+
+```java
+Map<String, Object> row = db.one("SELECT * FROM term WHERE id = :id", Map.of("id", id)).orElseThrow();
+String name = Rows.str(row, "name");                        // null, wenn die Spalte NULL ist
+String description = Rows.strOr(row, "description", "");    // nie der Text "null"
+boolean certified = Rows.bool(row, "name_certified");
+List<String> synonyms = Json.readStringList((String) row.get("synonyms"));   // JSON in einer Textspalte
+String json = Json.write(Map.of("viz_type", "bar"));        // null → null
+```
 
 ## Tests
 
